@@ -73,6 +73,17 @@ class DuplicateGlobals : public PassInfoMixin<DuplicateGlobals> {
         static bool isRequired() { return true; }
 };
 
+/**
+ * @brief Pass which fixes all the calls to protected functions in non-protected sources and duplicates 
+ */
+class MarkToExclude : public PassInfoMixin<MarkToExclude> {
+    public:
+        PreservedAnalyses run(Module &M,
+                              ModuleAnalysisManager &);
+
+        static bool isRequired() { return true; }
+};
+
 
 // CONTROL-FLOW CHECKING
 class CFCSS : public PassInfoMixin<CFCSS> {

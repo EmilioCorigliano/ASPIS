@@ -1,5 +1,11 @@
 add_subdirectory(Utils Utils)
 
+# MarkToExclude 
+add_library(MarkToExclude SHARED
+    MarkToExclude.cpp
+    Utils/Utils.cpp 
+)
+
 # EDDI 
 add_library(EDDI SHARED
     DuplicateGlobals.cpp
