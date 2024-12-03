@@ -41,6 +41,14 @@ __attribute__((annotate(<annotation>)))
 
 The following describes the possibilities for `<annotation>`.
 
+### The `recursive_protection` annotation
+
+```C
+__attribute__((annotate("recursive_protection")))
+```
+
+When a function is declared this way, ASPIS Recursively protects this resource. If the annotation is applied to a function, all the function body is protected and recursively all the called functions are duplicated (for exception of the `exclude` functions).
+
 ### The `to_duplicate` annotation
 
 ```C
@@ -58,6 +66,108 @@ When a global variable outside the compilation unit is declared this way, ASPIS 
 __attribute__((annotate("exclude")))
 ```
 ASPIS does not compile the annotated function or does not duplicate the annotated global variable.
+All its content is not duplicated, for exception of the protected global variables (way to enter in the sphere of replication).
+
+### General behaviour of REDDI
+
+All aliases are "solved" (aliases substituted with aliasees).
+All the `volatile` global variables are treated like `excluded` GV.
+
+We mark the resources to protect with the `recursive_protection` annotation and the resources that shouldn't be protected with the `exclude` annotation. In the middle there is the grey-area, with the rest of resources that are not marked at all. 
+First of all, recursively all the resources and their dependencies are protected, leading to an expansion of the sphere of replication.
+The most critical and non trivial transformations are the ones in the edges of the two spheres: when we have to go from the protected part to the excluded part and vice-versa.
+When all the duplication path is computed and protected, all the fixups will be done to generate coherent code, avoiding to call malformed functions.
+
+All uses of the `recursive_protection` global variables are duplicated:
+- In `exclude` functions, all operations are duplicated for both the GV or only the stores are duplicated?.
+    - If called a `recursive_protection` function: TBD (see Case 1) [ENTER IN SPHERE OF REPLICATION]
+    - If called a `to_duplicate` function: called two times for both the GV.
+    - If called a `exclude` function: called two times for both the GV.
+    - If called a grey-area funciton: TBD
+- In `to_duplicate` functions, all operations are duplicated for both the GV (Case 3).
+    - TBD
+- In grey-area and in `recursive_protection` functions, all operations are duplicated for both the GV.
+    - If called a `recursive_protection` function: TBD (see Case 1) 
+    - If called a `to_duplicate` function: called two times, one for first GV and one for the duplicated one.
+    - If called a `exclude` function: called two times for both the GV. [EXIT FROM SPHERE OF REPLICATION]
+    - If called a grey-area funciton: TBD
+
+### Bad particular cases
+#### Case 1
+What if it is called a `recursive_protection` with two parameters where the first is a `recursive_protection` GV and the other is an `exclude` GV.
+
+Solution 1:
+Creating an alternative where is duplicated only the parameter to duplicate but not the others.
+CON: Potentially could lead to GREAT increment of binary size
+PRO: Correct solution, without other assumptions
+
+Solution 2:
+Creating only one "_dup" function, but with flags to enable duplication of each input parameter and its relative checks.
+CON: Could lead to a higher overhead when sanity checking (runtime execution)
+PRO: Correct solution, without other assumptions. Just a small increment of spatial overhead wrt the previous EDDI method.
+
+Solution 3:
+Assert that this isn't a possible option
+CON: Great and incorrect assumption
+PRO: Code a lot easier
+
+#### Case 1.1
+What if it is called a `recursive_protection` with two parameters where the first one is a `recursive_protection` GV and the other is in the grey-area.
+
+Solution: Use the `_dup` version.
+
+#### Case 1.2
+What if it is called a `recursive_protection` with two parameters where the first one is an `exclude` GV and the other is in the grey-area.
+
+Solution: Use the `_original` version.
+
+#### Case 2
+How to handle the usage of a pointer to a `recursive_protection`?
+
+Solution 1:
+The Solution 2 of Case 1 could be useful for this case too. We could enable the protection of the parameters depending if the passed parameter is duplicated or not in the calling function.
+
+#### Case 3
+How to handle the usage of `recursive_protection` GV inside `to_duplicate` functions?
+
+e.g.
+```C
+int counter __attribute__((annotate("recursive_protection")));
+
+void malloc(int size) __attribute__((annotate("to_duplicate")))
+{
+    counter += size;
+}
+
+int main()
+{
+    counter = 0;
+    malloc(10);
+}
+```
+Transformed in:
+```C
+int counter;
+int counter_dup;
+
+void malloc(int size) __attribute__((annotate("to_duplicate")))
+{
+    counter += size;
+    counter_dup += size;
+}
+
+int main()
+{
+    counter = 0;
+    counter_dup = 0;
+    malloc(10);
+    malloc(10);
+}
+
+```
+
+Solution:
+Duplicate usages of GV.
 
 ## Built-in compilation pipeline
 `aspis.sh` is a simple command-line interface that allows users to run the entire compilation pipeline specifying a few command-line arguments. The arguments that are not recognised are passed directly to the front-end, hence all the `clang` arguments are admissible.
