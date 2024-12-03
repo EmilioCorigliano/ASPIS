@@ -52,25 +52,41 @@ PreservedAnalyses MarkToExclude::run(Module &Md, ModuleAnalysisManager &AM) {
   std::map<Value*, StringRef> FuncAnnotations;
   getFuncAnnotations(Md, FuncAnnotations);
 
+  // Create the annotation string as a global constant.
+  Constant *AnnotationString = ConstantDataArray::getString(Md.getContext(), "exclude", true);
+  GlobalVariable *AnnotationStringGlobal = new GlobalVariable(
+      Md,
+      AnnotationString->getType(),
+      true,
+      GlobalValue::PrivateLinkage,
+      AnnotationString,
+      ".str.annotation.exclude");
+  AnnotationStringGlobal->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+
   for (GlobalVariable &GV : Md.globals()) {
-    bool toExclude = FuncAnnotations.find(&GV) == FuncAnnotations.end() ||
-                     (!FuncAnnotations.find(&GV)->second.startswith("exclude") &&
-                     !FuncAnnotations.find(&GV)->second.startswith("to_duplicate"));
-    
-    if(toExclude){
-      LLVM_DEBUG(dbgs() << "Excluding " << GV.getName() << "\n");
-      GV.addAttribute("exclude");
+    bool isReservedName = GV.getName().starts_with("llvm.");
+    if(GV.isStrongDefinitionForLinker()){
+      bool toExclude = FuncAnnotations.find(&GV) == FuncAnnotations.end() ||
+                      (!FuncAnnotations.find(&GV)->second.startswith("exclude") &&
+                      !FuncAnnotations.find(&GV)->second.startswith("to_duplicate"));
+      
+      if(!isReservedName && toExclude){
+        LLVM_DEBUG(dbgs() << "Excluding " << GV.getName() << "\n");
+        addAnnotation(Md, GV, AnnotationStringGlobal);
+      }
     }
   }
 
-  for (auto &Fn : Md) {
-    bool toExclude = FuncAnnotations.find(&Fn) == FuncAnnotations.end() ||
-                     (!FuncAnnotations.find(&Fn)->second.startswith("exclude") && 
-                     !FuncAnnotations.find(&Fn)->second.startswith("to_duplicate"));
+  for (Function &Fn : Md) {
+    if(Fn.isStrongDefinitionForLinker()){
+      bool toExclude = FuncAnnotations.find(&Fn) == FuncAnnotations.end() ||
+                      (!FuncAnnotations.find(&Fn)->second.startswith("exclude") && 
+                      !FuncAnnotations.find(&Fn)->second.startswith("to_duplicate"));
 
-    if(toExclude){
-      LLVM_DEBUG(dbgs() << "Excluding " << Fn.getName() << "\n");
-      Fn.addFnAttr("exclude");
+      if(toExclude){
+        LLVM_DEBUG(dbgs() << "Excluding " << Fn.getName() << "\n");
+        addAnnotation(Md, Fn, AnnotationStringGlobal);
+      }
     }
   }
 

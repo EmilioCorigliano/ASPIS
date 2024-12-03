@@ -11,6 +11,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <llvm/Support/CommandLine.h>
 #include <map>
+#include <set>
 
 using namespace llvm;
 using LinkageMap = std::unordered_map<std::string, std::vector<StringRef>>;
@@ -29,6 +30,14 @@ bool IsNotAPHINode (Use &U);
  * @param FuncAnnotations A map of Function and StringRef where to put the annotations for each Function
  */
 void getFuncAnnotations(Module &Md, std::map<Value*, StringRef> &FuncAnnotations);
+
+/**
+ * Adds an annotation to a Global Object.
+ * @param Md The module where to add the annotation
+ * @param GO The Global Object to which the new annotation is added
+ * @param AnnotationStringGlobal The GlobalVariable representing the annotation to add
+ */
+void addAnnotation(Module &Md, GlobalObject &GO, GlobalVariable *AnnotationStringGlobal);
 
 // Inserts the names of the compiled functions as a csv into the file passed as parameter
 void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* filename);

@@ -6,6 +6,10 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
 #include <map>
@@ -65,6 +69,66 @@ void getFuncAnnotations(Module &Md, std::map<Value*, StringRef> &FuncAnnotations
       }
     }
   }
+}
+
+void addAnnotation(Module &M, GlobalObject &GV, GlobalVariable *AnnotationStringGlobal) {
+    LLVMContext &Context = M.getContext();
+
+    // Retrieve the existing @llvm.global.annotations.
+    GlobalVariable *GlobalAnnotations = M.getGlobalVariable("llvm.global.annotations");
+    if (!GlobalAnnotations) {
+        llvm::errs() << "Error: @llvm.global.annotations not found in the module.\n";
+        return;
+    }
+
+    // Get the constantness and the section name of the existing global variable.
+    bool isConstant = GlobalAnnotations->isConstant();
+    StringRef Section = GlobalAnnotations->getSection();
+
+    // Get the type of the annotations array and struct.
+    ArrayType *AnnotationsArrayType = cast<ArrayType>(GlobalAnnotations->getValueType());
+    StructType *AnnotationStructType = cast<StructType>(AnnotationsArrayType->getElementType());
+
+    // Create the new annotation struct fields.
+    PointerType *Int8PtrType = Type::getInt8Ty(Context)->getPointerTo();
+    Constant *GlobalVariableAsConstant = ConstantExpr::getBitCast(&GV, Int8PtrType);
+    Constant *AnnotationStringAsConstant = ConstantExpr::getBitCast(AnnotationStringGlobal, Int8PtrType);
+    Constant *NullPtr = ConstantPointerNull::get(Int8PtrType); // Null pointer for other fields.
+    Constant *IntegerConstant = ConstantInt::get(Type::getInt32Ty(Context), 0);
+
+    // Create the new annotation struct.
+    Constant *NewAnnotation = ConstantStruct::get(
+        AnnotationStructType,
+        {GlobalVariableAsConstant, AnnotationStringAsConstant, NullPtr, IntegerConstant, NullPtr});
+
+    // Retrieve existing annotations and append the new one.
+    std::vector<Constant *> Annotations;
+    if (ConstantArray *ExistingArray = dyn_cast<ConstantArray>(GlobalAnnotations->getInitializer())) {
+        for (unsigned i = 0; i < ExistingArray->getNumOperands(); ++i) {
+            Annotations.push_back(ExistingArray->getOperand(i));
+        }
+    }
+    Annotations.push_back(NewAnnotation);
+
+    // Create a new array with the correct type and size.
+    ArrayType *NewAnnotationsArrayType = ArrayType::get(AnnotationStructType, Annotations.size());
+    Constant *NewAnnotationsArray = ConstantArray::get(NewAnnotationsArrayType, Annotations);
+
+    // Remove the old global variable from the module's symbol table.
+    GlobalAnnotations->removeFromParent();
+    delete GlobalAnnotations;
+
+    // Create a new global variable with the exact name "llvm.global.annotations".
+    GlobalVariable *NewGlobalAnnotations = new GlobalVariable(
+        M,
+        NewAnnotationsArray->getType(),
+        isConstant,
+        GlobalValue::AppendingLinkage, // Must use appending linkage for @llvm.global.annotations.
+        NewAnnotationsArray,
+        "llvm.global.annotations");
+
+    // Set the section to match the original.
+    NewGlobalAnnotations->setSection(Section);
 }
 
 void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* filename) {
