@@ -41,10 +41,10 @@ __attribute__((annotate(<annotation>)))
 
 The following describes the possibilities for `<annotation>`.
 
-### The `recursive_protection` annotation
+### The `to_harden` annotation
 
 ```C
-__attribute__((annotate("recursive_protection")))
+__attribute__((annotate("to_harden")))
 ```
 
 When a function is declared this way, ASPIS Recursively protects this resource. If the annotation is applied to a function, all the function body is protected and recursively all the called functions are duplicated (for exception of the `exclude` functions).
@@ -71,30 +71,59 @@ All its content is not duplicated, for exception of the protected global variabl
 ### General behaviour of REDDI
 
 All aliases are "solved" (aliases substituted with aliasees).
-All the `volatile` global variables are treated like `excluded` GV.
+All the `volatile` global variables are treated like `exclude` GV.
 
-We mark the resources to protect with the `recursive_protection` annotation and the resources that shouldn't be protected with the `exclude` annotation. In the middle there is the grey-area, with the rest of resources that are not marked at all. 
+We mark the resources to protect with the `to_harden` annotation and the resources that shouldn't be protected with the `exclude` annotation. In the middle there is the grey-area, with the rest of resources that are not marked at all. 
 First of all, recursively all the resources and their dependencies are protected, leading to an expansion of the sphere of replication.
 The most critical and non trivial transformations are the ones in the edges of the two spheres: when we have to go from the protected part to the excluded part and vice-versa.
-When all the duplication path is computed and protected, all the fixups will be done to generate coherent code, avoiding to call malformed functions.
+When all the duplication path is computed and protected, all the fixups will be done to generate coherent code, avoiding the call of malformed functions.
 
-All uses of the `recursive_protection` global variables are duplicated:
-- In `exclude` functions, all operations are duplicated for both the GV or only the stores are duplicated?.
-    - If called a `recursive_protection` function: TBD (see Case 1) [ENTER IN SPHERE OF REPLICATION]
-    - If called a `to_duplicate` function: called two times for both the GV.
-    - If called a `exclude` function: called two times for both the GV.
-    - If called a grey-area funciton: TBD
-- In `to_duplicate` functions, all operations are duplicated for both the GV (Case 3).
-    - TBD
-- In grey-area and in `recursive_protection` functions, all operations are duplicated for both the GV.
-    - If called a `recursive_protection` function: TBD (see Case 1) 
-    - If called a `to_duplicate` function: called two times, one for first GV and one for the duplicated one.
-    - If called a `exclude` function: called two times for both the GV. [EXIT FROM SPHERE OF REPLICATION]
-    - If called a grey-area funciton: TBD
+All uses of the `to_harden` global variables are duplicated (also in `exclude` and `to_duplicate` functions).
+All the BB of the `to_harden` function are duplicated, along with all the used `to_harden` and grey-area functions. `to_duplicate` functions are called two times and `exclude` functions are called in their classic version.
+
+Particular cases when calling a function:
+- passing trivial variable by value
+- passing trivial variable by reference
+- passing trivial variable by pointer
+- passing complex variable by value
+- passing complex variable by reference
+- passing complex variable by pointer
+- passing function pointer: TBD (using two times the classic function?)
+
+
+All cases when in different kind of functions:
+- In `to_harden` functions:
+    - all operations are duplicated for everything.
+    - If call a `to_harden` function: Call the `_dup` version
+    - If call a `to_duplicate` function: Call two times the classic version
+    - If call a `exclude` function: Call the classic version [EXIT FROM SPHERE OF REPLICATION].
+    - If call a grey-area funciton: Call the `_dup` version [EXPANSION OF SPHERE OF REPLICATION].
+    - Return value: same but duplicated. Externally used just by the single return
+- In `to_duplicate` functions:
+    - all operations are duplicated for both the duplciated GV (Case 3).
+    - If call a `to_harden` function: Create `_dup` version of the `to_duplicate` function with just the needed duplicated parameters.
+    - If call a `to_duplicate` function: Call one time the function if the variable isn't duplicated.
+    - If call a `exclude` function: Call one time the classic version
+    - If call a grey-area funciton: Call the classic or `_original` version
+    - Return value: just one
+- In `exclude` functions:
+    - all operations are duplicated for both the duplicated GV [or only the stores are duplicated?].
+    - If call a `to_harden` function: Call the `_original` version
+    - If call a `to_duplicate` function: Call one time the classic or `_original` version
+    - If call a `exclude` function: Call the classic version
+    - If call a grey-area funciton: Call the classic or `_original` version
+    - Return value: just one
+- In grey-area functions:
+    - all operations are duplicated for both the duplicated GV.
+    - If call a `to_harden` function: Call the `_dup` version, duplicating all the parameters. If needed create a `_dup` version of itself (Case 5). Return is single but passed two times to the function [ENTER IN SPHERE OF REPLICATION]
+    - If call a `to_duplicate` function: Call two times the classic or `_original` or `_dup` version, depending if it is applied to a duplicated variable
+    - If call a `exclude` function: Call the classic version [EXIT FROM SPHERE OF REPLICATION]
+    - If call a grey-area funciton: Call the classic or `_original` version
+    - Return value: just one if its not duplicated, two if duplicated
 
 ### Bad particular cases
 #### Case 1
-What if it is called a `recursive_protection` with two parameters where the first is a `recursive_protection` GV and the other is an `exclude` GV.
+What if it is called a `to_harden` with two parameters where the first is a `to_harden` GV and the other is an `exclude` GV.
 
 Solution 1:
 Creating an alternative where is duplicated only the parameter to duplicate but not the others.
@@ -107,32 +136,32 @@ CON: Could lead to a higher overhead when sanity checking (runtime execution)
 PRO: Correct solution, without other assumptions. Just a small increment of spatial overhead wrt the previous EDDI method.
 
 Solution 3:
-Assert that this isn't a possible option
-CON: Great and incorrect assumption
+Assert that this isn't a possible option. This could be a way since, usually, all the operations with side effects (e.g. setting a volatile is done only in drivers, which usually are excluded).
+CON: Big and incorrect assumption
 PRO: Code a lot easier
 
 #### Case 1.1
-What if it is called a `recursive_protection` with two parameters where the first one is a `recursive_protection` GV and the other is in the grey-area.
+What if it is called a `to_harden` with two parameters where the first one is a `to_harden` GV and the other is in the grey-area.
 
 Solution: Use the `_dup` version.
 
 #### Case 1.2
-What if it is called a `recursive_protection` with two parameters where the first one is an `exclude` GV and the other is in the grey-area.
+What if it is called a `to_harden` with two parameters where the first one is an `exclude` GV and the other is in the grey-area.
 
 Solution: Use the `_original` version.
 
 #### Case 2
-How to handle the usage of a pointer to a `recursive_protection`?
+How to handle the usage of a pointer to a `to_harden`?
 
 Solution 1:
 The Solution 2 of Case 1 could be useful for this case too. We could enable the protection of the parameters depending if the passed parameter is duplicated or not in the calling function.
 
 #### Case 3
-How to handle the usage of `recursive_protection` GV inside `to_duplicate` functions?
+How to handle the usage of `to_harden` GV inside `to_duplicate` functions?
 
 e.g.
 ```C
-int counter __attribute__((annotate("recursive_protection")));
+int counter __attribute__((annotate("to_harden")));
 
 void malloc(int size) __attribute__((annotate("to_duplicate")))
 {
@@ -150,7 +179,7 @@ Transformed in:
 int counter;
 int counter_dup;
 
-void malloc(int size) __attribute__((annotate("to_duplicate")))
+void malloc(int size)
 {
     counter += size;
     counter_dup += size;
@@ -168,6 +197,76 @@ int main()
 
 Solution:
 Duplicate usages of GV.
+
+#### Case 4
+What to do with recursive functions? remember to handle it correctly (maybe we end up searching for the dup version while we are creating it).
+
+#### Case 5
+F1() calls F2(c,d) calls F3(a,b,c) (F3 to protect).
+If c is a complex type (pointer, struct, class), duplicate also F2_dup with selective parameters to duplicate.
+
+F1 is the origin of the "c" resource and it is duplicated selectively.
+
+Create F2_dup(c, c_dup, d)
+
+e.g.
+```C
+void add(int a, int b, int* c) __attribute__((annotate("to_harden"))) {
+    *c = a + b;
+}
+
+int wrapper_add(int a, int* b, char *str) {
+    int c = 0;
+    add(a, *b, &c);
+    puts(str);
+
+    return c;
+}
+
+int main() {
+    int b = 2;
+    char str[] = "aiuto";
+    int c = wrapper_add(1, &b, str);
+
+    return 0;
+}
+```
+
+Should be transformed in:
+```C
+void add_dup(int a, int a_dup, int b, int b_dup, int* c, int* c_dup) {
+    *c = a + b;
+    *c_dup = a_dup + b_dup;
+}
+
+// Return value da proteggere?
+void wrapper_add_dup(int *ret, int *ret_dup, int a, int a_dup, int* b, int* b_dup, char *str) {
+    int c = 0;
+    int c_dup = 0;
+    add_dup(a, a_dup, *b, *b_dup, &c, &c_dup);
+    puts(str);
+    *ret = c;
+    *ret_dup = c_dup;
+}
+
+int main() {
+    int b = 2;
+    int b_dup = 2;
+    char str[] = "aiuto";
+    int c;
+    int c_dup;
+    wrapper_add(&c, &c_dup, 1, 1, &b, &b_dup, str);
+
+    return 0;
+}
+```
+
+#### Case 6
+Pointer to function? AHHHHHHH
+
+
+#### Case 7
+What to do with return values? Maybe we don't want to duplicate return values. We could assume that the function to harden is self-contained or, in other words, the return value isn't used for operations critical for the hardening of the system.
 
 ## Built-in compilation pipeline
 `aspis.sh` is a simple command-line interface that allows users to run the entire compilation pipeline specifying a few command-line arguments. The arguments that are not recognised are passed directly to the front-end, hence all the `clang` arguments are admissible.
