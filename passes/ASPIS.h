@@ -5,6 +5,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Pass.h"
 #include <llvm/IR/Instructions.h>
+#include "Utils/Utils.h"
 #include <map>
 #include <set>
 
@@ -33,6 +34,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::set<Function*> CompiledFuncs;
         std::map<Value*, StringRef> FuncAnnotations;
         std::set<Function*> OriginalFunctions;
+        LinkageMap linkageMap;
 
         int isUsedByStore(Instruction &I, Instruction &Use);
         Instruction* cloneInstr(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap);
@@ -48,8 +50,10 @@ class EDDI : public PassInfoMixin<EDDI> {
         int duplicateInstruction (Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
         bool isValueDuplicated(std::map<Value *, Value *> &DuplicatedInstructionMap, Instruction &V);
         Function *duplicateFnArgs(Function &Fn, Module &Md, std::map<Value *, Value *> &DuplicatedInstructionMap);
+        void CreateErrBB(Module &Md, Function &Fn, BasicBlock *ErrBB);
 
         void fixGlobalCtors(Module &M);
+        void fixNonDuplicatedFunctions(Module &Md, std::map<Value *, Value *> DuplicatedInstructionMap, std::set<Function *> DuplicatedFns);
     public:
         PreservedAnalyses run(Module &M,
                               ModuleAnalysisManager &);

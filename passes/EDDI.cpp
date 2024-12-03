@@ -779,7 +779,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   LLVM_DEBUG(dbgs() << "[done]\n");
 
   createFtFuncs(Md);
-  LinkageMap linkageMap = mapFunctionLinkageNames(Md);
+  linkageMap = mapFunctionLinkageNames(Md);
 
   // fix debug information in the first BB of each function
   if(DebugEnabled) {
@@ -822,8 +822,8 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
       FnList.push_back(&Fn);
       ValueToValueMapTy Params;
       Function *OriginalFn = CloneFunction(&Fn, Params);
-      OriginalFunctions.insert(OriginalFn);
       OriginalFn->setName(Fn.getName().str() + "_original");
+      OriginalFunctions.insert(OriginalFn);
     }
   }
 
@@ -905,6 +905,75 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
       }
 
       // insert the code for calling the error basic block in case of a mismatch
+      CreateErrBB(Md, Fn, ErrBB);
+    }
+  }
+  
+  // Drop the instructions that have been marked for removal earlier
+  for (Instruction *I2rm : InstructionsToRemove) {
+    I2rm->eraseFromParent();
+  }
+
+  fixNonDuplicatedFunctions(Md, DuplicatedInstructionMap, DuplicatedFns);
+  fixGlobalCtors(Md);
+
+  persistCompiledFunctions(CompiledFuncs, "compiled_eddi_functions.csv");
+
+/*   if (Function *mainFunc = Md.getFunction("main")) {
+    errs() << *mainFunc;
+  } else {
+    errs() << "Function 'main' not found!\n";
+  }
+ */
+  return PreservedAnalyses::none();
+}
+
+/**
+ * @brief Fix all calls to duplicated funcitons or original functions, calling the relative _dup or _original version
+ */
+void EDDI::fixNonDuplicatedFunctions(Module &Md, std::map<Value *, Value *> DuplicatedInstructionMap, std::set<Function *> DuplicatedFns){
+  for(auto &Fn : Md){
+    LLVM_DEBUG(dbgs() << "[EDDI] Fixing " << Fn.getName() << "\n");
+
+    for(auto &B : Fn){
+      for(auto &I : B){
+        if(isa<CallBase>(I) ){
+          CallBase &ICall = cast<CallBase>(I);
+          Function *calledFn = ICall.getCalledFunction();
+
+          // Function *DupFn = Md.getFunction(calledFn->getName().str() + "_dup");
+          // if (DupFn != NULL) {
+          //   outs() << "[EDDI] Fixing (duplicating): " << Fn.getName() << "\n";
+          //   // If duplicated function call the _dup variant
+          //   BasicBlock *ErrBB = BasicBlock::Create(Fn.getContext(), "ErrBB", &Fn);
+          //   duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
+          //   CreateErrBB(Md, Fn, ErrBB);
+          // }
+
+          if(DuplicatedFns.find(calledFn) !=  DuplicatedFns.end()){
+            outs() << "[EDDI] Fixing (duplicating): " << Fn.getName() << " called " << calledFn->getName() << "\n";
+            // If duplicated function call the _dup variant
+            BasicBlock *ErrBB = BasicBlock::Create(Fn.getContext(), "ErrBB", &Fn);
+            duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
+            CreateErrBB(Md, Fn, ErrBB);
+          } else {
+            if (calledFn != NULL && calledFn->hasName()) {
+              Function *OriginalFn = Md.getFunction(calledFn->getName().str() + "_original");
+              if (OriginalFn != NULL) {
+                outs() << "[EDDI] Fixing (original): " << Fn.getName() << " called " << calledFn->getName() << " to " << OriginalFn->getName() << "\n";
+                ICall.setCalledFunction(OriginalFn);
+              } else {
+                outs() << "[EDDI] Fixing (original): " << Fn.getName() << " called " << calledFn->getName() << " NOT CHANGED\n";
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+void EDDI::CreateErrBB(Module &Md, Function &Fn, BasicBlock *ErrBB){
       IRBuilder<> ErrB(ErrBB);
 
       assert(!getLinkageName(linkageMap, "DataCorruption_Handler").empty() &&
@@ -939,24 +1008,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
       }
       ErrBB->eraseFromParent();
     }
-  }
-
-  // Drop the instructions that have been marked for removal earlier
-  for (Instruction *I2rm : InstructionsToRemove) {
-    I2rm->eraseFromParent();
-  }
-
-  fixGlobalCtors(Md);
-  persistCompiledFunctions(CompiledFuncs, "compiled_eddi_functions.csv");
-
-/*   if (Function *mainFunc = Md.getFunction("main")) {
-    errs() << *mainFunc;
-  } else {
-    errs() << "Function 'main' not found!\n";
-  }
- */
-  return PreservedAnalyses::none();
-}
 
 void EDDI::fixGlobalCtors(Module &M) {
   LLVM_DEBUG(dbgs() << "[EDDI] Fixing global constructors\n");
