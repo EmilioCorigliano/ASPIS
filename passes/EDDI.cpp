@@ -53,6 +53,124 @@ using namespace llvm;
 // #define CHECK_AT_BRANCH
 
 /**
+ * @brief Fill toHardenFunctions and toHardenVariables sets with all the functions and 
+ * global variables that will need to be hardened.
+ * 
+ * The rules to enter in toHardenFunctions set are:
+ * - Explicitely marked as `to_harden`
+ * - Called by a `to_harden` function and not an `exclude` or `to_duplicate` function
+ * - Used by a `to_harden` GlobalVariable
+ * 
+ * The rule to enter in toHardenVariables set is that it is a global variable explicitly
+ * marked as `to_harden`
+ */
+void EDDI::preprocess(Module &Md) {
+  // Replace all uses of alias to aliasee
+  LLVM_DEBUG(dbgs() << "[REDDI] Replacing aliases\n");
+  for (auto &alias : Md.aliases()) {
+    auto aliasee = alias.getAliaseeObject();
+    if(isa<Function>(aliasee)){
+      LLVM_DEBUG(dbgs() << "[REDDI] Replacing uses of " << alias.getName() <<  " to " << aliasee->getName() << "\n");
+      alias.replaceAllUsesWith(aliasee);
+    }
+  }
+  LLVM_DEBUG(dbgs() << "\n");
+
+  LLVM_DEBUG(dbgs() << "Getting annotations... ");
+  getFuncAnnotations(Md, FuncAnnotations);
+  LLVM_DEBUG(dbgs() << "[done]\n\n");
+
+  // Getting the explicit `to_harden` functions and Values
+  LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions and Global variables to harden\n");
+  for(auto x : FuncAnnotations) {
+    if(x.second.startswith("to_harden")) {
+      if(isa<Function>(x.first)) {
+        toHardenFunctions.insert(cast<Function>(x.first));
+        LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << x.first->getName() << "\n");
+      } else if(isa<Value>(x.first)) {
+        toHardenVariables.insert(cast<Value>(x.first));
+        LLVM_DEBUG(dbgs() << "[REDDI] GlobalVariable to harden: " << x.first->getName() << "\n");
+      } else {
+        LLVM_DEBUG(errs() << "[REDDI] OTHER to harden: " << x.first->getName() << "\n");
+      }
+    };
+  }
+  LLVM_DEBUG(dbgs() << "\n");
+
+  // Recursively retrieve values to harden
+  LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions to harden called by a Global Variable\n");
+  for(Value *V : toHardenVariables) {
+    for(User *U : V->users()) {
+      if(isa<LoadInst>(U)) {
+        for (auto *LoadUser : cast<LoadInst>(U)->users()) {
+          if (isa<CallBase>(LoadUser)) {
+            auto *CInst = cast<CallBase>(LoadUser);
+            if (Function *Fn = CInst->getCalledFunction()) {
+              toHardenFunctions.insert(Fn);
+              LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through load): " << Fn->getName() << " (called by " << V->getName() << ")\n");
+            } else {
+              LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (through load, called by " << V->getName() << ")\n");
+            }
+          }
+        }
+      } else if(isa<CallBase>(U)) {        
+        if (Function *Fn = cast<CallBase>(U)->getCalledFunction()) {
+          toHardenFunctions.insert(Fn);
+          LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
+        } else {
+          LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
+        }
+      }
+    }
+  }
+  LLVM_DEBUG(dbgs() << "\n");
+
+  // Recursively retrieve functions to harden
+  LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions to harden recursively\n");
+  std::set<Function *> JustAddedFns{toHardenFunctions};
+  while(!JustAddedFns.empty()) {
+    // New discovered functions
+    std::set<Function *> toAddFns;
+    for(Function *Fn : JustAddedFns) {
+      for(BasicBlock &BB : *Fn) {
+        for(Instruction &I : BB) {
+          if(isa<CallBase>(I)) {
+            if(Function *CalledFn = cast<CallBase>(I).getCalledFunction()) {
+              auto CalledFnEntry = FuncAnnotations.find(CalledFn);
+              bool to_harden = (CalledFnEntry == FuncAnnotations.end()) || 
+                !(CalledFnEntry->second.startswith("exclude") || CalledFnEntry->second.startswith("to_duplicate"));
+              LLVM_DEBUG(dbgs() << "[REDDI] " << Fn->getName() << " called " << CalledFn->getName() << 
+                ((CalledFnEntry == FuncAnnotations.end()) ? " (not annotated)" : "") <<
+                ((CalledFnEntry != FuncAnnotations.end() && CalledFnEntry->second.startswith("exclude")) ? " (exclude)" : "") <<
+                (toHardenFunctions.find(CalledFn) != toHardenFunctions.end() ? " (already in toHardenFunctions)" : "") <<
+                (JustAddedFns.find(CalledFn) != JustAddedFns.end() ? " (already in JustAddedFns)" : "") <<
+                "\n");
+              if(to_harden && 
+                toHardenFunctions.find(CalledFn) == toHardenFunctions.end() && 
+                JustAddedFns.find(CalledFn) == JustAddedFns.end()) {
+                toAddFns.insert(CalledFn);
+                LLVM_DEBUG(dbgs() << "[REDDI] Added: " << CalledFn->getName() << "\n");
+              }
+            } else {
+              LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << Fn->getName() << ")\n");
+              I.print(errs());
+              errs() << "\n";
+            }
+          }
+        }
+      }
+    }
+
+    // Add the just analyzed functions to the `toHardenFunctions` set
+    toHardenFunctions.merge(JustAddedFns);
+    // Now analyze the just discovered functions
+    JustAddedFns = toAddFns;
+  }
+
+  LLVM_DEBUG(dbgs() << "[REDDI] preprocess done\n\n");
+}
+
+/**
  * Determines whether a instruction &I is used by store instructions different
  * than &Use
  * @param I is the operand that we want to check whether is used by store
@@ -763,20 +881,10 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
  * @return
  */
 PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
-  LLVM_DEBUG(dbgs() << "Initializing EDDI...\n");
+  LLVM_DEBUG(dbgs() << "Initializing REDDI...\n");
 
-  // Replace all uses of alias to aliasee
-  for (auto &alias : Md.aliases()) {
-    auto aliasee = alias.getAliaseeObject();
-    if(isa<Function>(aliasee)){
-      LLVM_DEBUG(dbgs() << "[EDDI] Replacing uses of " << alias.getName() <<  " to " << aliasee->getName() << "\n");
-      alias.replaceAllUsesWith(aliasee);
-    }
-  }
-
-  LLVM_DEBUG(dbgs() << "Getting annotations... ");
-  getFuncAnnotations(Md, FuncAnnotations);
-  LLVM_DEBUG(dbgs() << "[done]\n");
+  preprocess(Md);
+  LLVM_DEBUG(dbgs() << "[REDDI] Preprocess finished\n");
 
   createFtFuncs(Md);
   linkageMap = mapFunctionLinkageNames(Md);
