@@ -47,7 +47,11 @@ The following describes the possibilities for `<annotation>`.
 __attribute__((annotate("to_harden")))
 ```
 
-When a function is declared this way, ASPIS Recursively protects this resource. If the annotation is applied to a function, all the function body is protected and recursively all the called functions are duplicated (for exception of the `exclude` functions).
+When a function is declared this way, ASPIS Recursively protects this resource.
+If the annotation is applied to a function, all the function body is protected and recursively all the called functions are duplicated (for exception of the `exclude` functions).
+If the annotation is applied to a variable, all its uses are protected:
+- TBD
+
 
 ### The `to_duplicate` annotation
 
@@ -139,6 +143,13 @@ Solution 3:
 Assert that this isn't a possible option. This could be a way since, usually, all the operations with side effects (e.g. setting a volatile is done only in drivers, which usually are excluded).
 CON: Big and incorrect assumption
 PRO: Code a lot easier
+
+Solution 4:
+Creating only one "_dup" function and, if we don't want to duplicate a parameter, we pass two times the same one. In the function, at every store, we check that the address of the lvalue is different from the lvalue_dup. If it is a value, it is duplicated always. If it is a reference or a pointer, it must be checked.
+We could implement this check only in case of dereference of pointer or usage of a reference (?).
+CON: Could lead to a higher overhead during execution
+PRO: Doesn't have assumptions. Just a small increment of spatial overhead wrt the previous EDDI method.
+
 
 #### Case 1.1
 What if it is called a `to_harden` with two parameters where the first one is a `to_harden` GV and the other is in the grey-area.
@@ -267,6 +278,114 @@ Pointer to function? AHHHHHHH
 
 #### Case 7
 What to do with return values? Maybe we don't want to duplicate return values. We could assume that the function to harden is self-contained or, in other words, the return value isn't used for operations critical for the hardening of the system.
+
+
+#### Case 8
+What about global variables `to_harden`?
+
+e.g.
+```C++
+class MyClass {
+public:
+    void setState(int newState) {
+        state = newState;
+    };
+
+    int getState() {
+        return state;
+    }
+
+private:
+    int state = 0;
+};
+
+MyClass myGlobalHardenedClass __attribute__((annotate("to_harden")));
+
+int main() {
+    int state0 = 42;
+    MyClass myHardenedClass __attribute__((annotate("to_harden")));
+    MyClass myClass;
+
+    myGlobalHardenedClass.setState(state0);
+    myHardenedClass.setState(state0);
+    myClass.setState(state0);
+
+    return 0;
+}
+```
+
+should be transformed into:
+- MyClass need the `_dup` version of the functions
+- Both `myGlobalHardenedClass` and `myHardenedClass` should call the `_dup` versions of the methods.
+- `myClass` should call the `_original` versions of methods.
+
+#### Case 9
+
+e.g.
+```C++
+class MyClass {
+public:
+    void addState(int *var) {
+        *var = *var + state; 
+    }
+
+private:
+    int state = 1;
+};
+
+MyClass myGlobalHardenedClass __attribute__((annotate("to_harden")));
+
+int main() {
+    int a = 1;
+
+    myGlobalHardenedClass.addState(&a);
+
+    return 0;
+}
+```
+
+Should be transformed in:
+```C++
+class MyClass {
+    int state = 1;
+    int state_dup = 1;
+};
+
+void MyClass::addState(MyClass *myClass, MyClass *myClass_dup, int *var, int *var_dup) {
+    *var = *var + myClass->state;
+
+    // all the stores uses the _dup version if &lvalue_dup != &lvalue
+    if(&(*var_dup) != &(*var)) {
+        *var_dup = *var_dup + myClass_dup->state_dup;
+    }
+}
+
+MyClass myGlobalHardenedClass;
+MyClass myGlobalHardenedClass_dup;
+
+int main() {
+    int a = 1;
+
+    MyClass::addState(&myGlobalHardenedClass, &myGlobalHardenedClass_dup, &a, &a);
+
+    return 0;
+}
+```
+
+#### Case 10
+Indirect function calls: What to do when is performed the dynamic dispatch?
+
+
+Solution 1:
+Mark as `to_harden` all the methods of that class, all base classes and to be changed also their vtable entries!
+
+Solution 2:
+Create a new vtable for the real type of the GV to harden with reference to all the methods, then modify the constructor `_dup` to swap the vtable with the custom made one
+
+Solution 3:
+Create an entirely new type, with modified methods and its vtable has the new defined methods
+
+
 
 ## Built-in compilation pipeline
 `aspis.sh` is a simple command-line interface that allows users to run the entire compilation pipeline specifying a few command-line arguments. The arguments that are not recognised are passed directly to the front-end, hence all the `clang` arguments are admissible.
