@@ -99,29 +99,33 @@ void EDDI::preprocess(Module &Md) {
 
   // Recursively retrieve values to harden
   LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions to harden called by a Global Variable\n");
-  for(Value *V : toHardenVariables) {
-    for(User *U : V->users()) {
-      if(isa<LoadInst>(U)) {
-        for (auto *LoadUser : cast<LoadInst>(U)->users()) {
-          if (isa<CallBase>(LoadUser)) {
-            auto *CInst = cast<CallBase>(LoadUser);
-            if (Function *Fn = CInst->getCalledFunction()) {
-              toHardenFunctions.insert(Fn);
-              LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through load): " << Fn->getName() << " (called by " << V->getName() << ")\n");
-            } else {
-              LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (through load, called by " << V->getName() << ")\n");
-            }
+  // Collecting all the functions called by a value to be hardened
+  std::set<Value *> toCheckVariables{toHardenVariables};
+  while(!toCheckVariables.empty()){
+    std::set<Value *> toAddVariables; // support set to contain new to-be-checked values
+    for(Value *V : toCheckVariables) {
+      for(User *U : V->users()) {
+        if(isa<StoreInst>(U)) { 
+          auto *value = cast<StoreInst>(U)->getOperand(0);
+          if(value != NULL && value != V) {
+            toAddVariables.insert(value);
+            LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through store): " << " (called by " << cast<StoreInst>(U)->getOperand(0)->getName() << ")\n");
           }
-        }
-      } else if(isa<CallBase>(U)) {        
-        if (Function *Fn = cast<CallBase>(U)->getCalledFunction()) {
-          toHardenFunctions.insert(Fn);
-          LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
-        } else {
-          LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
+        } else if(isa<LoadInst>(U)) {
+          toAddVariables.insert(cast<LoadInst>(U));
+          LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through load): " << " (called by " << cast<LoadInst>(U)->getName() << ")\n");
+        } else if(isa<CallBase>(U)) {        
+          if (Function *Fn = cast<CallBase>(U)->getCalledFunction()) {
+            toHardenFunctions.insert(Fn);
+            LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
+          } else {
+            LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
+          }
         }
       }
     }
+    // merge toCheckVariables into toHardenVariables?
+    toCheckVariables = toAddVariables;
   }
   LLVM_DEBUG(dbgs() << "\n");
 
