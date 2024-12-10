@@ -8,6 +8,7 @@
  * ************************************************************************************************
  */
 #include "ASPIS.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -21,6 +22,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include <regex>
 #include <array>
 #include <fstream>
 #include <iostream>
@@ -52,6 +54,259 @@ using namespace llvm;
 // #define CHECK_AT_CALLS
 // #define CHECK_AT_BRANCH
 
+// Regex to match constructors: the class name should be the same of the function name
+std::regex ConstructorRegex(R"(([\w]+)::\1\((.*?)\)$)"); 
+
+/**
+ * @brief Check if the passed store is the one which saves the vtable in the object.
+ * In case it is, return the pointer to the GV of the vtable.
+ * 
+ * @param SInst Reference to the store instruction to analyze.
+ * @return The pointer to the vtable global variable, if found; nullptr otherwise.
+ */
+GlobalVariable* isVTableStore(StoreInst &SInst) {
+  if(isa<GetElementPtrInst>(SInst.getValueOperand())) {
+    // TODO: Should see the uses of the valueOperand to find this inst in case it happens
+    errs() << "this is a GEP instruction\n";
+    auto *V = cast<GetElementPtrInst>(SInst.getValueOperand())->getOperand(0);
+    if(isa<GlobalVariable>(V)) {
+      auto *GV = cast<GlobalVariable>(V);
+      auto vtableName = demangle(GV->getName().str());
+      // Found "vtable" in name
+      if(vtableName.find("vtable") != vtableName.npos) {
+        // LLVM_DEBUG(dbgs() << "[REDDI] GEP Vtable name: " << vtableName << " of function " << Fn->getName() << "\n");
+        return GV;
+      }
+    }
+  } else if(isa<ConstantExpr>(SInst.getValueOperand())) {
+    auto *CE = cast<ConstantExpr>(SInst.getValueOperand());
+    if(CE->getOpcode() == Instruction::GetElementPtr && isa<GlobalVariable>(CE->getOperand(0))) {
+      auto *GV = cast<GlobalVariable>(CE->getOperand(0));
+      auto vtableName = demangle(GV->getName().str());
+      // Found "vtable" in name
+      if(vtableName.find("vtable") != vtableName.npos) {
+        // LLVM_DEBUG(dbgs() << "[REDDI] CE Vtable name: " << vtableName << " of function " << Fn->getName() << "\n");
+        return GV;
+      }
+    }
+  }
+  
+  return nullptr;
+}
+
+/**
+ * @brief Retrieve all the virtual methods present in the vtable from the pointer to the constructor.
+ * 
+ * @param Fn pointer to a function.
+ * @return A set containing the virtual functions referenced in the vtable (could be empty).
+ */
+std::set<Function *> EDDI::getVirtualMethodsFromConstructor(Function *Fn) {
+  std::set<Function *> virtualMethods;
+
+  if(!Fn) {
+    errs() << "Fn is not a valid function.\n";
+    return virtualMethods;
+  }
+
+  // Find vtable
+  GlobalVariable *vtable = nullptr;
+  for(auto &BB : *Fn) {
+    for(auto &I : BB) {
+      if(isa<StoreInst>(I)){
+        auto &SInst = cast<StoreInst>(I);
+        vtable = isVTableStore(SInst);
+      }
+
+      if(vtable)
+        break;
+    }
+
+    if(vtable)
+      break;
+  }
+  
+  // Get all the virtual methods
+  if(vtable) {
+    // Ensure the vtable global variable has an initializer
+    Constant *Initializer = vtable->getInitializer();
+    if (!Initializer || !isa<ConstantStruct>(Initializer)) {
+      errs() << "Vtable initializer is not a ConstantStruct.\n";
+      return virtualMethods;
+    }
+
+    // Extract the array field from the struct
+    ConstantStruct *VTableStruct = cast<ConstantStruct>(Initializer);
+    if (VTableStruct->getNumOperands() != 1) {
+      errs() << "Unexpected number of fields in vtable struct.\n";
+      return virtualMethods;
+    }
+
+    Constant *ArrayField = VTableStruct->getOperand(0);
+    if (!isa<ConstantArray>(ArrayField)) {
+      errs() << "Vtable field is not a ConstantArray.\n";
+      return virtualMethods;
+    }
+
+    // get virtual functions to harden from vtable
+    for (Value *Elem : cast<ConstantArray>(ArrayField)->operands()) {
+      if (isa<Function>(Elem)) {
+        virtualMethods.insert(cast<Function>(Elem));
+        LLVM_DEBUG(dbgs() << "[REDDI] Found virtual method " << cast<Function>(Elem)->getName() <<  " in " << Fn->getName() << "\n");
+      }
+    }
+  }
+
+  return virtualMethods;
+}
+
+/**
+ * @brief For each toHardenConstructors, modifies the store for the vtable so that is used 
+ * the `_dup` version of that vtable.
+ * 
+ * identifies the store which saves the vtable in the object (if exists). Found it, 
+ * duplicates the vtable (uses all the virtual `_dup` methods) and uses this new vtable 
+ * (global variable) in the store.
+ * 
+ * @param Md The module we are analyzing.
+ */
+void EDDI::fixDuplicatedConstructors(Module &Md) {
+  for(Function *Fn : toHardenConstructors) {
+    GlobalVariable *vtable = nullptr;
+    GlobalVariable *NewVtable = nullptr;
+    StoreInst *SInstVtable = nullptr;
+    Function *FnDup = getFunctionDuplicate(Fn);
+
+    if(!FnDup) {
+      errs() << "Doesn't exist the dup version of " << Fn->getName() << "\n";
+      continue;
+    }
+
+    // Find vtable
+    LLVM_DEBUG(dbgs() << "[REDDI] Finding vtable for " << Fn->getName() << "\n");
+    for(auto &BB : *Fn) {
+      for(auto &I : BB) {
+        if(isa<StoreInst>(I)){
+          auto &SInst = cast<StoreInst>(I);
+          vtable = isVTableStore(SInst);
+        }
+      
+        if(vtable)
+          break;
+      }
+
+      if(vtable) 
+        break;
+    }
+
+    // Duplicate vtable
+    if(vtable) {
+      LLVM_DEBUG(dbgs() << "[REDDI] Duplicating vtable: " << vtable->getName() << " of function " << FnDup->getName() << "\n");
+      
+      // Ensure the vtable global variable has an initializer
+      Constant *Initializer = vtable->getInitializer();
+      if (!Initializer || !isa<ConstantStruct>(Initializer)) {
+        errs() << "Vtable initializer is not a ConstantStruct.\n";
+        return;
+      }
+
+      // Extract the array field from the struct
+      ConstantStruct *VTableStruct = cast<ConstantStruct>(Initializer);
+      if (VTableStruct->getNumOperands() != 1) {
+        errs() << "Unexpected number of fields in vtable struct.\n";
+        return;
+      }
+
+      Constant *ArrayField = VTableStruct->getOperand(0);
+      if (!isa<ConstantArray>(ArrayField)) {
+        errs() << "Vtable field is not a ConstantArray.\n";
+        return;
+      }
+
+      ConstantArray *FunctionArray = cast<ConstantArray>(ArrayField);
+
+      // Iterate over elements of the array and modify function pointers
+      std::vector<Constant *> ModifiedElements;
+      for (Value *Elem : FunctionArray->operands()) {
+        if (isa<Function>(Elem)) {
+          Function *Func = cast<Function>(Elem);
+          // Replace with the _dup version of the function
+          std::string DupName = Func->getName().str() + "_dup";
+          Function *DupFunction = Md.getFunction(DupName);
+
+          if (DupFunction) {
+            LLVM_DEBUG(dbgs() << "Getting _dup function: " << DupFunction->getName() << "\n");
+            ModifiedElements.push_back(DupFunction);
+          } else {
+            errs() << "Missing _dup function for: " << Func->getName() << "\n";
+            ModifiedElements.push_back(cast<Constant>(Elem)); // Keep the original
+          }
+        } else {
+          // Retain non-function elements
+          ModifiedElements.push_back(cast<Constant>(Elem));
+        }
+      }
+
+      // Create a new ConstantArray with the modified elements
+      ArrayType *ArrayType = FunctionArray->getType();
+      Constant *NewArray = ConstantArray::get(ArrayType, ModifiedElements);
+
+      // Create a new ConstantStruct for the vtable
+      Constant *NewVTableStruct = ConstantStruct::get(VTableStruct->getType(), NewArray);
+
+      // Create a new global variable for the modified vtable
+      NewVtable = new GlobalVariable(
+        Md,
+        NewVTableStruct->getType(),
+        vtable->isConstant(),
+        GlobalValue::ExternalLinkage,
+        NewVTableStruct,
+        vtable->getName() + "_dup"
+      );
+      NewVtable->setSection(vtable->getSection());
+      LLVM_DEBUG(dbgs() << "[REDDI] Created new vtable: " << NewVtable->getName() << "\n");
+    }
+
+    // In the dup constructor, change the relative store
+    if(NewVtable) {
+      for(auto &BB : *FnDup) {
+        for(auto &I : BB) {
+          if(isa<StoreInst>(I)) {
+            auto &SInst = cast<StoreInst>(I);
+            if(isVTableStore(SInst)) {
+              if(isa<GetElementPtrInst>(SInst.getValueOperand())) {
+                // TODO: Should see the uses of the valueOperand to find this inst in case it happens
+                errs() << "this is a GEP instruction\n";
+              } else if(isa<ConstantExpr>(SInst.getValueOperand())) {
+                auto *CE = cast<ConstantExpr>(SInst.getValueOperand());
+                if (CE->getOpcode() == Instruction::GetElementPtr) {
+                  // Extract the indices and base type
+                  std::vector<Constant *> Indices = {
+                                  ConstantInt::get(Type::getInt32Ty(Md.getContext()), 0),
+                                  ConstantInt::get(Type::getInt32Ty(Md.getContext()), 0),
+                                  ConstantInt::get(Type::getInt32Ty(Md.getContext()), 2)
+                                };
+
+                  // Create a new GEP ConstantExpr with the new vtable
+                  auto *NewGEP = ConstantExpr::getGetElementPtr(
+                      cast<GEPOperator>(CE)->getSourceElementType(), 
+                      NewVtable,
+                      Indices,
+                      cast<GEPOperator>(CE)->isInBounds()
+                  );
+
+                  // Update the store instruction
+                  SInst.setOperand(0, NewGEP);
+                }
+                LLVM_DEBUG(dbgs() << "[REDDI] Changed vtable_dup store with new vtable: " << NewVtable->getName() << "\n");
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 /**
  * @brief Fill toHardenFunctions and toHardenVariables sets with all the functions and 
  * global variables that will need to be hardened.
@@ -60,9 +315,12 @@ using namespace llvm;
  * - Explicitely marked as `to_harden`
  * - Called by a `to_harden` function and not an `exclude` or `to_duplicate` function
  * - Used by a `to_harden` GlobalVariable
+ * - Present in a vtable of a `to_harden` object
  * 
  * The rule to enter in toHardenVariables set is that it is a global variable explicitly
  * marked as `to_harden`
+ * 
+ * @param Md The module we are analyzing.
  */
 void EDDI::preprocess(Module &Md) {
   // Replace all uses of alias to aliasee
@@ -97,17 +355,18 @@ void EDDI::preprocess(Module &Md) {
   }
   LLVM_DEBUG(dbgs() << "\n");
 
-  // Recursively retrieve values to harden
-  LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions to harden called by a Global Variable\n");
   // Collecting all the functions called by a value to be hardened
+  LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions to harden called by a Global Variable\n");
   std::set<Value *> toCheckVariables{toHardenVariables};
   while(!toCheckVariables.empty()){
     std::set<Value *> toAddVariables; // support set to contain new to-be-checked values
     for(Value *V : toCheckVariables) {
       for(User *U : V->users()) {
         if(isa<StoreInst>(U)) { 
-          auto *value = cast<StoreInst>(U)->getOperand(0);
-          if(value != NULL && value != V) {
+          // If the user is a store instruction, should be hardened also the value operand (if it isn't the already checked variable)
+          auto *value = cast<StoreInst>(U)->getValueOperand();
+          // Add value to be protected if never encountered before
+          if(value != NULL && value != V && toHardenVariables.find(value) == toHardenVariables.end() && toCheckVariables.find(value) == toCheckVariables.end()) {
             toAddVariables.insert(value);
             LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through store): " << " (called by " << cast<StoreInst>(U)->getOperand(0)->getName() << ")\n");
           }
@@ -124,7 +383,7 @@ void EDDI::preprocess(Module &Md) {
         }
       }
     }
-    // merge toCheckVariables into toHardenVariables?
+    toHardenVariables.merge(toCheckVariables);
     toCheckVariables = toAddVariables;
   }
   LLVM_DEBUG(dbgs() << "\n");
@@ -136,6 +395,16 @@ void EDDI::preprocess(Module &Md) {
     // New discovered functions
     std::set<Function *> toAddFns;
     for(Function *Fn : JustAddedFns) {
+      // Check if it is a constructor
+      std::string DemangledName = demangle(Fn->getName().str());
+      if(std::regex_match(DemangledName, ConstructorRegex)) {
+        // Add it to the toHardenConstructors set and retrieve all its virtualMethods
+        LLVM_DEBUG(dbgs() << "[REDDI] CONSTRUCTOR: " << Fn->getName() << " -> " << DemangledName << "\n");
+        toHardenConstructors.insert(Fn);
+        toAddFns.merge(getVirtualMethodsFromConstructor(Fn));
+      }
+
+      // Retrieve all the other called functions
       for(BasicBlock &BB : *Fn) {
         for(Instruction &I : BB) {
           if(isa<CallBase>(I)) {
@@ -552,10 +821,12 @@ void EDDI::duplicateGlobals(
     GVars.push_back(&GV);
   }
   for (auto GV : GVars) {
+    auto GVAnnotation = FuncAnnotations.find(GV);
     if (!isa<Function>(GV) &&
-        FuncAnnotations.find(GV) != FuncAnnotations.end()) {
-      if ((FuncAnnotations.find(GV))->second.startswith("runtime_sig") ||
-          (FuncAnnotations.find(GV))->second.startswith("run_adj_sig")) {
+        GVAnnotation != FuncAnnotations.end()) {
+      // What does these annotations do?
+      if (GVAnnotation->second.startswith("runtime_sig") ||
+          GVAnnotation->second.startswith("run_adj_sig")) {
         continue;
       }
     }
@@ -579,8 +850,8 @@ void EDDI::duplicateGlobals(
     bool isMetadataInfo = GV->getSection() == "llvm.metadata";
     bool isReservedName = GV->getName().starts_with("llvm.");
     bool toExclude = !isa<Function>(GV) &&
-                     FuncAnnotations.find(GV) != FuncAnnotations.end() &&
-                     (FuncAnnotations.find(GV))->second.startswith("exclude");
+                     GVAnnotation != FuncAnnotations.end() &&
+                     GVAnnotation->second.startswith("exclude");
 
     if (! (isFunction || isConstant || endsWithDup || isMetadataInfo || isReservedName || toExclude) // is not function, constant, struct and does not end with _dup
         /* && ((hasInternalLinkage && (!isArray || (isArray && !cast<ArrayType>(GV.getValueType())->getArrayElementType()->isAggregateType() ))) // has internal linkage and is not an array, or is an array but the element type is not aggregate
@@ -620,21 +891,21 @@ void EDDI::duplicateGlobals(
   }
 }
 
-  bool EDDI::isAllocaForExceptionHandling(AllocaInst &I){
-    for (auto e : I.users())
-    {
-      if (isa<StoreInst>(e)){
-        StoreInst *storeInst=cast<StoreInst>(e);
-        auto *valueOperand =storeInst->getValueOperand();
-        if(isa<CallBase>(valueOperand)){
-          CallBase *callInst = cast<CallBase>(valueOperand);
-          if (callInst->getCalledFunction()->getName().equals("__cxa_begin_catch"))
-          {return true;}
-        }
-        
+bool EDDI::isAllocaForExceptionHandling(AllocaInst &I){
+  for (auto e : I.users())
+  {
+    if (isa<StoreInst>(e)){
+      StoreInst *storeInst=cast<StoreInst>(e);
+      auto *valueOperand =storeInst->getValueOperand();
+      if(isa<CallBase>(valueOperand)){
+        CallBase *callInst = cast<CallBase>(valueOperand);
+        if (callInst->getCalledFunction()->getName().equals("__cxa_begin_catch"))
+        {return true;}
       }
+      
     }
-    return false;
+  }
+  return false;
 }
 
 /**
@@ -921,104 +1192,81 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   LLVM_DEBUG(dbgs() << "[done]\n");
 
   // store the functions that are currently in the module
-  std::list<Function *> FnList;
   std::set<Function *> DuplicatedFns;
 
-  LLVM_DEBUG(dbgs() << "Retrieving functions to compile... ");
-  // first store the instructions to compile in the current module
-  int cnt = 0;
-  for (Function &Fn : Md) {
-    if (shouldCompile(Fn, FuncAnnotations, OriginalFunctions)) {
-      cnt++;
-      // LLVM_DEBUG(dbgs() << "Found: " << cnt << "\r");
-      FnList.push_back(&Fn);
-      ValueToValueMapTy Params;
-      Function *OriginalFn = CloneFunction(&Fn, Params);
-      OriginalFn->setName(Fn.getName().str() + "_original");
-      OriginalFunctions.insert(OriginalFn);
+  // then duplicate the function arguments using toHardenFunctions
+  LLVM_DEBUG(dbgs() << "Creating _dup functions\n");
+  for (Function *Fn : toHardenFunctions) {
+    // Create dup functions only if the function is declared in this module
+    if(!Fn->isDeclaration()) {
+      Function *newFn = duplicateFnArgs(*Fn, Md, DuplicatedInstructionMap);
+      DuplicatedFns.insert(newFn);
     }
   }
+  LLVM_DEBUG(dbgs() << "[done] Creating _dup functions\n");
 
-  LLVM_DEBUG(dbgs() << "Found: " << FnList.size() << "\n");
-
-  // then duplicate the function arguments using FnList populated earlier
-  for (Function *Fn : FnList) {
-    Function *newFn = duplicateFnArgs(*Fn, Md, DuplicatedInstructionMap);
-    DuplicatedFns.insert(newFn);
-  }
+  // Fixing the duplicated constructors
+  fixDuplicatedConstructors(Md);
 
   // list of duplicated instructions to remove since they are equal to the
   // original
   std::list<Instruction *> InstructionsToRemove;
-  int i = -1;
-  int tot_funcs = 0;
-  for (Function &Fn : Md) {
-    if (shouldCompile(Fn, FuncAnnotations, OriginalFunctions)) {
-      tot_funcs++;
-    }
-  }
+  int i = 1;
   LLVM_DEBUG(dbgs() << "Iterating over the module functions...\n");
-  for (Function &Fn : Md) {
-    if (shouldCompile(Fn, FuncAnnotations, OriginalFunctions)) {
-      i++;
-      LLVM_DEBUG(dbgs() << "Compiling " << i << "/" << tot_funcs << ": "
-                        << Fn.getName() << "\n");
-      //"                                                              \r" );
-      CompiledFuncs.insert(&Fn);
-      BasicBlock *ErrBB = BasicBlock::Create(Fn.getContext(), "ErrBB", &Fn);
 
-      // If the function is a duplicated one, we need to
-      // iterate over the function arguments and duplicate
-      // them in order to access them during the instruction
-      // duplication phase
-      if (DuplicatedFns.find(&Fn) != DuplicatedFns.end()) {
-        // save the function arguments and their duplicates
-        for (int i = 0; i < Fn.arg_size(); i++) {
-          Value *Arg, *ArgClone;
-          if (AlternateMemMapEnabled == false) {
-            if (i >= Fn.arg_size() / 2) {
-              break;
-            }
-            Arg = Fn.getArg(i);
-            ArgClone = Fn.getArg(i + Fn.arg_size() / 2);
-          } else {
-            if (i % 2 == 1)
-              continue;
-            Arg = Fn.getArg(i);
-            ArgClone = Fn.getArg(i + 1);
-          }
-          DuplicatedInstructionMap.insert(
-              std::pair<Value *, Value *>(Arg, ArgClone));
-          DuplicatedInstructionMap.insert(
-              std::pair<Value *, Value *>(ArgClone, Arg));
-          for (User *U : Arg->users()) {
-            if (isa<Instruction>(U)) {
-              // duplicate the uses of each argument
-              duplicateInstruction(cast<Instruction>(*U),
-                                   DuplicatedInstructionMap, *ErrBB);
-            }
-          }
+  for (Function *Fn : DuplicatedFns) {
+    LLVM_DEBUG(dbgs() << "Compiling " << i++ << "/" << DuplicatedFns.size() << ": "
+                      << Fn->getName() << "\n");
+    CompiledFuncs.insert(Fn);
+    BasicBlock *ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
+
+    // save the function arguments and their duplicates
+    for (int i = 0; i < Fn->arg_size(); i++) {
+      Value *Arg, *ArgClone;
+      if (AlternateMemMapEnabled == false) {
+        if (i >= Fn->arg_size() / 2) {
+          break;
+        }
+        Arg = Fn->getArg(i);
+        ArgClone = Fn->getArg(i + Fn->arg_size() / 2);
+      } else {
+        if (i % 2 == 1)
+          continue;
+        Arg = Fn->getArg(i);
+        ArgClone = Fn->getArg(i + 1);
+      }
+      DuplicatedInstructionMap.insert(
+          std::pair<Value *, Value *>(Arg, ArgClone));
+      DuplicatedInstructionMap.insert(
+          std::pair<Value *, Value *>(ArgClone, Arg));
+      for (User *U : Arg->users()) {
+        if (isa<Instruction>(U)) {
+          // duplicate the uses of each argument
+          duplicateInstruction(cast<Instruction>(*U),
+                                DuplicatedInstructionMap, *ErrBB);
         }
       }
-
-      for (BasicBlock &BB : Fn) {
-        for (Instruction &I : BB) {
-          if (!isValueDuplicated(DuplicatedInstructionMap, I)) {
-            // perform the duplication
-            int shouldDelete =
-                duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
-            // the instruction duplicated may be equal to the original, so we
-            // return shouldDelete in order to drop the duplicates
-            if (shouldDelete) {
-              InstructionsToRemove.push_back(&I);
-            }
-          }
-        }
-      }
-
-      // insert the code for calling the error basic block in case of a mismatch
-      CreateErrBB(Md, Fn, ErrBB);
     }
+
+    for (BasicBlock &BB : *Fn) {
+      for (Instruction &I : BB) {
+        if (!isValueDuplicated(DuplicatedInstructionMap, I)) {
+          // perform the duplication
+          int shouldDelete =
+              duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
+          // the instruction duplicated may be equal to the original, so we
+          // return shouldDelete in order to drop the duplicates
+
+          // TODO: Why to be done in another phase and not in duplciateInstruction? 
+          if (shouldDelete) {
+            InstructionsToRemove.push_back(&I);
+          }
+        }
+      }
+    }
+
+    // insert the code for calling the error basic block in case of a mismatch
+    CreateErrBB(Md, *Fn, ErrBB);
   }
   
   // Drop the instructions that have been marked for removal earlier
@@ -1026,9 +1274,9 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     I2rm->eraseFromParent();
   }
 
-  fixNonDuplicatedFunctions(Md, DuplicatedInstructionMap, DuplicatedFns);
   fixGlobalCtors(Md);
 
+  LLVM_DEBUG(dbgs() << "Persisting Compiled Functions...\n");
   persistCompiledFunctions(CompiledFuncs, "compiled_eddi_functions.csv");
 
 /*   if (Function *mainFunc = Md.getFunction("main")) {
@@ -1128,8 +1376,8 @@ void EDDI::fixGlobalCtors(Module &M) {
   // Retrieve the existing @llvm.global_ctors.
   GlobalVariable *GlobalCtors = M.getGlobalVariable("llvm.global_ctors");
   if (!GlobalCtors) {
-      llvm::errs() << "Error: @llvm.global_ctors not found in the module.\n";
-      return;
+    errs() << "Error: @llvm.global_ctors not found in the module.\n";
+    return;
   }
 
   // Get the constantness and the section name of the existing global variable.

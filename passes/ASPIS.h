@@ -35,12 +35,15 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::map<Value*, StringRef> FuncAnnotations;
         std::set<Function*> OriginalFunctions;
 
+        std::set<Function*> toHardenConstructors;
         std::set<Function*> toHardenFunctions;
         std::set<Value*> toHardenVariables;
         
         LinkageMap linkageMap;
 
         void preprocess(Module &Md);
+        void fixDuplicatedConstructors(Module &Md);
+        std::set<Function *> getVirtualMethodsFromConstructor(Function *Fn);
         int isUsedByStore(Instruction &I, Instruction &Use);
         Instruction* cloneInstr(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap);
         void duplicateOperands (Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
