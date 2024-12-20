@@ -1034,9 +1034,9 @@ int EDDI::duplicateInstruction(
       }
       // get the function with the duplicated signature, if it exists
       Function *Fn = getFunctionDuplicate(CInstr->getCalledFunction());
-      // if the _dup function exists, we substitute the call instruction with a
+      // if the _dup function exists or is an indirect call, we substitute the call instruction with a
       // call to the function with duplicated arguments
-      if (Fn != NULL) {
+      if (Fn != NULL || CInstr->getCalledFunction() == NULL) {
         std::vector<Value *> args;
         int i = 0;
         for (Value *Original : CInstr->args()) {
@@ -1057,7 +1057,74 @@ int EDDI::duplicateInstruction(
           i++;
         }
 
-        if (Fn != CInstr->getCalledFunction()) {
+        if (CInstr->getCalledFunction() == NULL) {
+          // In case of duplication of an indirect call, call the function with doubled parameters
+          SmallVector<Value *, 6> args;
+          SmallVector<Type *, 6> ParamTypes;
+          for (unsigned i = 0; i < CInstr->arg_size(); ++i) {
+            // Populate args and ParamTypes from the original instruction
+            Value *Arg = CInstr->getArgOperand(i);
+            Value *Copy = Arg;
+
+            if(DuplicatedInstructionMap.find(Arg) != DuplicatedInstructionMap.end()) {
+              Copy = DuplicatedInstructionMap.find(Arg)->second;
+            }
+
+            if (!AlternateMemMapEnabled) {
+              args.insert(args.begin() + i, Copy);
+              args.push_back(Arg);
+              ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
+              ParamTypes.push_back(Arg->getType());
+            } else {
+              args.push_back(Copy);
+              args.push_back(Arg);
+              ParamTypes.push_back(Arg->getType());
+              ParamTypes.push_back(Arg->getType());
+            }
+          }
+
+          // Create the new function type
+          Type *ReturnType = CInstr->getType();
+          FunctionType *FuncType = FunctionType::get(ReturnType, ParamTypes, false);
+
+          // Create a dummy function pointer (Fn) for the new call
+          IRBuilder<> Builder(CInstr);
+          Value *Fn = Builder.CreateBitCast(CInstr->getCalledOperand(), FuncType->getPointerTo());
+
+          // Create the new call or invoke instruction
+          Instruction *NewCInstr;
+          if (auto *IInst = dyn_cast<InvokeInst>(CInstr)) {
+            NewCInstr = Builder.CreateInvoke(
+                FuncType, Fn, IInst->getNormalDest(), IInst->getUnwindDest(), args);
+          } else {
+            NewCInstr = Builder.CreateCall(FuncType, Fn, args);
+          }
+
+          // Transfer parameter attributes
+          for (unsigned i = 0; i < CInstr->arg_size(); ++i) {
+            AttributeSet ParamAttrs = CInstr->getAttributes().getParamAttrs(i);
+            for(auto &attr : ParamAttrs) {
+              if (AlternateMemMapEnabled == false) {
+                cast<CallBase>(NewCInstr)->addParamAttr(i, attr);
+                cast<CallBase>(NewCInstr)->addParamAttr(i + CInstr->arg_size(), attr);
+              } else {
+                cast<CallBase>(NewCInstr)->addParamAttr(i*2, attr);
+                cast<CallBase>(NewCInstr)->addParamAttr(i*2 + 1 , attr);
+              }
+            }
+          }
+
+          // Copy metadata and debug location
+          if (DebugEnabled) {
+            NewCInstr->setDebugLoc(CInstr->getDebugLoc());
+          }
+
+          // Replace the old instruction with the new one
+          CInstr->replaceNonMetadataUsesWith(NewCInstr);
+
+          // Remove original instruction since we created the duplicated version
+          res = 1;
+        } else if (Fn != NULL && Fn != Callee) {
           Instruction *NewCInstr;
           IRBuilder<> CallBuilder(CInstr);
           if (isa<InvokeInst>(CInstr)) {
