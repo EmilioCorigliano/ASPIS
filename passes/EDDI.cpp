@@ -817,8 +817,10 @@ void EDDI::duplicateGlobals(
   Value *RuntimeSig;
   Value *RetSig;
   std::list<GlobalVariable *> GVars;
-  for (GlobalVariable &GV : Md.globals()) {
-    GVars.push_back(&GV);
+  for (auto *V : toHardenVariables) {
+    if(isa<GlobalVariable>(V)) {
+      GVars.push_back(cast<GlobalVariable>(V));
+    }
   }
   for (auto GV : GVars) {
     auto GVAnnotation = FuncAnnotations.find(GV);
@@ -1334,6 +1336,43 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
 
     // insert the code for calling the error basic block in case of a mismatch
     CreateErrBB(Md, *Fn, ErrBB);
+  }
+  
+  // Duplicate usages of global variables to harden only if not in a _dup function 
+  // (already handled in a duplicated function)
+  for (Value *V : toHardenVariables) {
+    for(User *U : V->users()) {
+      if(isa<StoreInst>(U) || isa<CallBase>(U)) {
+        Instruction *I = cast<Instruction>(U);
+        BasicBlock *ErrBB = nullptr;
+        bool newErrBB = true;
+        
+        Function *Fn = I->getFunction();
+        // Duplicate instruction only if this isn't an already duplicated function
+        if(!Fn->getName().ends_with("_dup")) {
+          // Search pre-existant ErrBB
+          for(BasicBlock &BB : *Fn) {
+            if(BB.getName().starts_with("ErrBB")) {
+              ErrBB = &BB;
+              newErrBB = false; // ErrBB already present
+            }
+          }
+
+          if(newErrBB) {
+            ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
+          }
+
+          if(duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB)) {
+            InstructionsToRemove.push_back(I);
+          }
+
+          if(newErrBB) {
+            // insert the code for calling the error basic block in case of a mismatch
+            CreateErrBB(Md, *Fn, ErrBB);
+          }
+        }
+      }
+    }
   }
   
   // Drop the instructions that have been marked for removal earlier
