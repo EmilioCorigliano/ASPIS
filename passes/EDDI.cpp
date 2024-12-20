@@ -1048,11 +1048,11 @@ int EDDI::duplicateInstruction(
           }
 
           if (AlternateMemMapEnabled == false) {
-            args.insert(args.begin() + i, Original);
-            args.push_back(Copy);
-          } else {
+            args.insert(args.begin() + i, Copy);
             args.push_back(Original);
+          } else {
             args.push_back(Copy);
+            args.push_back(Original);
           }
           i++;
         }
