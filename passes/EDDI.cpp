@@ -342,7 +342,8 @@ void EDDI::preprocess(Module &Md) {
   LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions and Global variables to harden\n");
   for(auto x : FuncAnnotations) {
     if(x.second.startswith("to_harden")) {
-      if(isa<Function>(x.first)) {
+      if(isa<Function>(x.first) && getFunctionDuplicate(cast<Function>(x.first)) == NULL) {
+        // If is a function and it isn't/hasn't a duplicate version already
         toHardenFunctions.insert(cast<Function>(x.first));
         LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << x.first->getName() << "\n");
       } else if(isa<Value>(x.first)) {
@@ -374,7 +375,9 @@ void EDDI::preprocess(Module &Md) {
           toAddVariables.insert(cast<LoadInst>(U));
           LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through load): " << " (called by " << cast<LoadInst>(U)->getName() << ")\n");
         } else if(isa<CallBase>(U)) {        
-          if (Function *Fn = cast<CallBase>(U)->getCalledFunction()) {
+          Function *Fn = cast<CallBase>(U)->getCalledFunction();  
+          if (Fn != NULL && getFunctionDuplicate(Fn) == NULL) {
+            // If it isn't/hasn't a duplicate version already
             toHardenFunctions.insert(Fn);
             LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
           } else {
@@ -397,8 +400,9 @@ void EDDI::preprocess(Module &Md) {
     for(Function *Fn : JustAddedFns) {
       // Check if it is a constructor
       std::string DemangledName = demangle(Fn->getName().str());
-      if(std::regex_match(DemangledName, ConstructorRegex)) {
+      if(std::regex_match(DemangledName, ConstructorRegex) && getFunctionDuplicate(Fn) == NULL) {
         // Add it to the toHardenConstructors set and retrieve all its virtualMethods
+        // if it isn't/hasn't a duplicate version already
         LLVM_DEBUG(dbgs() << "[REDDI] CONSTRUCTOR: " << Fn->getName() << " -> " << DemangledName << "\n");
         toHardenConstructors.insert(Fn);
         toAddFns.merge(getVirtualMethodsFromConstructor(Fn));
@@ -418,9 +422,9 @@ void EDDI::preprocess(Module &Md) {
                 (toHardenFunctions.find(CalledFn) != toHardenFunctions.end() ? " (already in toHardenFunctions)" : "") <<
                 (JustAddedFns.find(CalledFn) != JustAddedFns.end() ? " (already in JustAddedFns)" : "") <<
                 "\n");
-              if(to_harden && 
-                toHardenFunctions.find(CalledFn) == toHardenFunctions.end() && 
-                JustAddedFns.find(CalledFn) == JustAddedFns.end()) {
+              if(to_harden && toHardenFunctions.find(CalledFn) == toHardenFunctions.end() && 
+                JustAddedFns.find(CalledFn) == JustAddedFns.end() && getFunctionDuplicate(CalledFn) == NULL) {
+                // If is a new function to and it isn't/hasn't a duplicate version
                 toAddFns.insert(CalledFn);
                 LLVM_DEBUG(dbgs() << "[REDDI] Added: " << CalledFn->getName() << "\n");
               }
