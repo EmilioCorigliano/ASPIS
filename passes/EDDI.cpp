@@ -57,6 +57,8 @@ using namespace llvm;
 // Regex to match constructors: the class name should be the same of the function name
 std::regex ConstructorRegex(R"(([\w]+)::\1\((.*?)\)$)"); 
 
+std::set<InvokeInst *> toFixInvokes;
+
 /**
  * @brief Check if the passed store is the one which saves the vtable in the object.
  * In case it is, return the pointer to the GV of the vtable.
@@ -759,20 +761,21 @@ void EDDI::fixFuncValsPassedByReference(
   int numOps = I.getNumOperands();
   for (int i = 0; i < numOps; i++) {
     Value *V = I.getOperand(i);
-    if (isa<Instruction>(V) && V->getType()->isPointerTy()) {
+    if (isa<Instruction>(V)) {
       Instruction *Operand = cast<Instruction>(V);
       auto Duplicate = DuplicatedInstructionMap.find(Operand);
       if (Duplicate != DuplicatedInstructionMap.end()) {
         Value *Original = Duplicate->first;
         Value *Copy = Duplicate->second;
-
-        Type *OriginalType = Original->getType();
-        Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
-        Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
-        DuplicatedInstructionMap.insert(
-            std::pair<Instruction *, Instruction *>(TmpLoad, TmpLoad));
-        DuplicatedInstructionMap.insert(
-            std::pair<Instruction *, Instruction *>(TmpStore, TmpStore));
+        if(Original->getType()->isPointerTy() && Copy->getType()->isPointerTy()) {
+          Type *OriginalType = Original->getType();
+          Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
+          Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
+          DuplicatedInstructionMap.insert(
+              std::pair<Instruction *, Instruction *>(TmpLoad, TmpLoad));
+          DuplicatedInstructionMap.insert(
+              std::pair<Instruction *, Instruction *>(TmpStore, TmpStore));
+        }
       }
     }
   }
@@ -914,6 +917,103 @@ bool EDDI::isAllocaForExceptionHandling(AllocaInst &I){
   return false;
 }
 
+int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap,
+    IRBuilder<> &B) {
+  int res = 0;
+  SmallVector<Value *, 6> args;
+  SmallVector<Type *, 6> ParamTypes;
+  
+  Function *Callee = CInstr->getCalledFunction();
+  Function *Fn = getFunctionDuplicate(Callee);
+
+  for (unsigned i = 0; i < CInstr->arg_size(); i++) {
+    // Populate args and ParamTypes from the original instruction
+    Value *Arg = CInstr->getArgOperand(i);
+    Value *Copy = Arg;
+
+    // see if Original has a copy
+    if(DuplicatedInstructionMap.find(Arg) != DuplicatedInstructionMap.end()) {
+      Copy = DuplicatedInstructionMap.find(Arg)->second;
+    }
+
+    if (!AlternateMemMapEnabled && (Callee == NULL || !Callee->isVarArg())) {
+      args.insert(args.begin() + i, Copy);
+      args.push_back(Arg);
+      ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
+      ParamTypes.push_back(Arg->getType());
+    } else {
+      args.push_back(Copy);
+      args.push_back(Arg);
+      ParamTypes.push_back(Arg->getType());
+      ParamTypes.push_back(Arg->getType());
+    }
+  }
+
+  // In case of duplication of an indirect call, call the function with doubled parameters
+  if (Callee == NULL) {
+    // Create the new function type
+    Type *ReturnType = CInstr->getType();
+    FunctionType *FuncType = FunctionType::get(ReturnType, ParamTypes, false);
+
+    // Create a dummy function pointer (Fn) for the new call
+    IRBuilder<> CallBuilder(CInstr);
+    Value *Fn = CallBuilder.CreateBitCast(CInstr->getCalledOperand(), FuncType->getPointerTo());
+
+    // Create the new call or invoke instruction
+    Instruction *NewCInstr;
+    if (isa<InvokeInst>(CInstr)) {
+      InvokeInst *IInst=cast<InvokeInst>(CInstr);
+      NewCInstr = CallBuilder.CreateInvoke(
+          FuncType, Fn, IInst->getNormalDest(), IInst->getUnwindDest(), args);
+    } else {
+      NewCInstr = CallBuilder.CreateCall(FuncType, Fn, args);
+    }
+
+    // Transfer parameter attributes
+    for (unsigned i = 0; i < CInstr->arg_size(); ++i) {
+      AttributeSet ParamAttrs = CInstr->getAttributes().getParamAttrs(i);
+      for(auto &attr : ParamAttrs) {
+        // Assuming that indirect function calls aren't variadic
+        if (!AlternateMemMapEnabled) {
+          cast<CallBase>(NewCInstr)->addParamAttr(i, attr);
+          cast<CallBase>(NewCInstr)->addParamAttr(i + CInstr->arg_size(), attr);
+        } else {
+          cast<CallBase>(NewCInstr)->addParamAttr(i*2, attr);
+          cast<CallBase>(NewCInstr)->addParamAttr(i*2 + 1 , attr);
+        }
+      }
+    }
+
+    // Copy metadata and debug location
+    if (DebugEnabled) {
+      NewCInstr->setDebugLoc(CInstr->getDebugLoc());
+    }
+
+    // Replace the old instruction with the new one
+    CInstr->replaceNonMetadataUsesWith(NewCInstr);
+
+    // Remove original instruction since we created the duplicated version
+    res = 1;
+  } else if (Fn != NULL && Fn != Callee) {
+    Instruction *NewCInstr;
+    IRBuilder<> CallBuilder(CInstr);
+    if (isa<InvokeInst>(CInstr)) {
+      InvokeInst *IInst=cast<InvokeInst>(CInstr);
+      NewCInstr = CallBuilder.CreateInvoke(Fn->getFunctionType(), Fn,IInst->getNormalDest(),IInst->getUnwindDest(), args);
+    } else {
+      NewCInstr =  CallBuilder.CreateCall(Fn->getFunctionType(), Fn, args);
+    }
+
+    if (DebugEnabled) {
+      NewCInstr->setDebugLoc(CInstr->getDebugLoc());
+    }
+    res = 1;
+    CInstr->replaceNonMetadataUsesWith(NewCInstr);
+  }
+
+  return res;
+}
+
 /**
  * Performs a duplication of the instruction I. Performing the following
  * operations depending on the class of I:
@@ -974,7 +1074,9 @@ int EDDI::duplicateInstruction(
     // that happens I just remove the duplicate
     if (IClone->isIdenticalTo(&I)) {
       IClone->eraseFromParent();
-      DuplicatedInstructionMap.erase(DuplicatedInstructionMap.find(&I));
+      if(DuplicatedInstructionMap.find(&I) != DuplicatedInstructionMap.end()) {
+        DuplicatedInstructionMap.erase(DuplicatedInstructionMap.find(&I));
+      }
     }
   }
 
@@ -1010,6 +1112,14 @@ int EDDI::duplicateInstruction(
       // duplicate the operands
       duplicateOperands(I, DuplicatedInstructionMap, ErrBB);
 
+      if(isa<InvokeInst>(I)) {
+        // In case of an invoke instruction, we have to fix the first invoke since 
+        // it would jump to the next BB and not to the duplicated invoke instruction
+        auto *IInstr = &cast<InvokeInst>(I);
+        toFixInvokes.insert(IInstr);
+        LLVM_DEBUG(dbgs() << "To fix duplicated invoke inst in " << IInstr->getParent()->getParent()->getName() << "\n");
+      }
+
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
 #if (SELECTIVE_CHECKING == 1)
@@ -1032,120 +1142,21 @@ int EDDI::duplicateInstruction(
 #endif
 
       IRBuilder<> B(CInstr);
-      if (!isa<InvokeInst>(CInstr)) {
+      if (!isa<InvokeInst>(CInstr) && I.getNextNonDebugInstruction()) {
         B.SetInsertPoint(I.getNextNonDebugInstruction());
-      } else {
+      } else if(cast<InvokeInst>(CInstr)->getNormalDest()) {
         B.SetInsertPoint(
             &*cast<InvokeInst>(CInstr)->getNormalDest()->getFirstInsertionPt());
+      } else {
+        LLVM_DEBUG(errs() << "Can't set insert point!\n");
+        abort();
       }
       // get the function with the duplicated signature, if it exists
       Function *Fn = getFunctionDuplicate(CInstr->getCalledFunction());
-      // if the _dup function exists or is an indirect call, we substitute the call instruction with a
-      // call to the function with duplicated arguments
-      if (Fn != NULL || CInstr->getCalledFunction() == NULL) {
-        std::vector<Value *> args;
-        int i = 0;
-        for (Value *Original : CInstr->args()) {
-          Value *Copy = Original;
-          // see if Original has a copy
-          if (DuplicatedInstructionMap.find(Original) !=
-              DuplicatedInstructionMap.end()) {
-            Copy = DuplicatedInstructionMap.find(Original)->second;
-          }
-
-          if (AlternateMemMapEnabled == false) {
-            args.insert(args.begin() + i, Copy);
-            args.push_back(Original);
-          } else {
-            args.push_back(Copy);
-            args.push_back(Original);
-          }
-          i++;
-        }
-
-        if (CInstr->getCalledFunction() == NULL) {
-          // In case of duplication of an indirect call, call the function with doubled parameters
-          SmallVector<Value *, 6> args;
-          SmallVector<Type *, 6> ParamTypes;
-          for (unsigned i = 0; i < CInstr->arg_size(); ++i) {
-            // Populate args and ParamTypes from the original instruction
-            Value *Arg = CInstr->getArgOperand(i);
-            Value *Copy = Arg;
-
-            if(DuplicatedInstructionMap.find(Arg) != DuplicatedInstructionMap.end()) {
-              Copy = DuplicatedInstructionMap.find(Arg)->second;
-            }
-
-            if (!AlternateMemMapEnabled) {
-              args.insert(args.begin() + i, Copy);
-              args.push_back(Arg);
-              ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
-              ParamTypes.push_back(Arg->getType());
-            } else {
-              args.push_back(Copy);
-              args.push_back(Arg);
-              ParamTypes.push_back(Arg->getType());
-              ParamTypes.push_back(Arg->getType());
-            }
-          }
-
-          // Create the new function type
-          Type *ReturnType = CInstr->getType();
-          FunctionType *FuncType = FunctionType::get(ReturnType, ParamTypes, false);
-
-          // Create a dummy function pointer (Fn) for the new call
-          IRBuilder<> Builder(CInstr);
-          Value *Fn = Builder.CreateBitCast(CInstr->getCalledOperand(), FuncType->getPointerTo());
-
-          // Create the new call or invoke instruction
-          Instruction *NewCInstr;
-          if (auto *IInst = dyn_cast<InvokeInst>(CInstr)) {
-            NewCInstr = Builder.CreateInvoke(
-                FuncType, Fn, IInst->getNormalDest(), IInst->getUnwindDest(), args);
-          } else {
-            NewCInstr = Builder.CreateCall(FuncType, Fn, args);
-          }
-
-          // Transfer parameter attributes
-          for (unsigned i = 0; i < CInstr->arg_size(); ++i) {
-            AttributeSet ParamAttrs = CInstr->getAttributes().getParamAttrs(i);
-            for(auto &attr : ParamAttrs) {
-              if (AlternateMemMapEnabled == false) {
-                cast<CallBase>(NewCInstr)->addParamAttr(i, attr);
-                cast<CallBase>(NewCInstr)->addParamAttr(i + CInstr->arg_size(), attr);
-              } else {
-                cast<CallBase>(NewCInstr)->addParamAttr(i*2, attr);
-                cast<CallBase>(NewCInstr)->addParamAttr(i*2 + 1 , attr);
-              }
-            }
-          }
-
-          // Copy metadata and debug location
-          if (DebugEnabled) {
-            NewCInstr->setDebugLoc(CInstr->getDebugLoc());
-          }
-
-          // Replace the old instruction with the new one
-          CInstr->replaceNonMetadataUsesWith(NewCInstr);
-
-          // Remove original instruction since we created the duplicated version
-          res = 1;
-        } else if (Fn != NULL && Fn != Callee) {
-          Instruction *NewCInstr;
-          IRBuilder<> CallBuilder(CInstr);
-          if (isa<InvokeInst>(CInstr)) {
-            InvokeInst *IInst=cast<InvokeInst>(CInstr);
-            NewCInstr = CallBuilder.CreateInvoke(Fn->getFunctionType(), Fn,IInst->getNormalDest(),IInst->getUnwindDest(), args);
-          } else {
-            NewCInstr =  CallBuilder.CreateCall(Fn->getFunctionType(), Fn, args);
-          }
-
-          if (DebugEnabled) {
-          NewCInstr->setDebugLoc(CInstr->getDebugLoc());
-          }
-          res = 1;
-          CInstr->replaceNonMetadataUsesWith(NewCInstr);
-        }
+      // if the _dup function exists (and it is not itself the dup version) or is an indirect call, 
+      // we substitute the call instruction with a call to the function with duplicated arguments
+      if (CInstr->getCalledFunction() == NULL || (Fn != NULL && Fn != CInstr->getCalledFunction())) {
+        res = transformCallBaseInst(CInstr, DuplicatedInstructionMap, B);
       } else {
         fixFuncValsPassedByReference(*CInstr, DuplicatedInstructionMap, B);
       }
@@ -1187,7 +1198,7 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
   std::vector<Type *> paramTypeVec;
   for (int i = 0; i < Fn.arg_size(); i++) {
     Type *ParamType = FnType->params()[i];
-    if (AlternateMemMapEnabled == false) { // sequential
+    if (!AlternateMemMapEnabled && !Fn.isVarArg()) { // sequential
       paramTypeVec.insert(paramTypeVec.begin() + i, ParamType);
       paramTypeVec.push_back(ParamType);
     } else {
@@ -1210,7 +1221,7 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
       Fn.getArg(i)->removeAttr(Attribute::AttrKind::StructRet);
     }
 
-    if (AlternateMemMapEnabled == false) {
+    if (AlternateMemMapEnabled == false && !Fn.isVarArg()) {
       Params[Fn.getArg(i)] = ClonedFunc->getArg(Fn.arg_size() + i);
     } else {
       Params[Fn.getArg(i)] = ClonedFunc->getArg(i * 2);
@@ -1271,7 +1282,8 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   LLVM_DEBUG(dbgs() << "Creating _dup functions\n");
   for (Function *Fn : toHardenFunctions) {
     // Create dup functions only if the function is declared in this module
-    if(!Fn->isDeclaration()) {
+    // and isn't just to be duplicated
+    if(!Fn->isDeclaration() && !isIntrinsicName(*Fn)) {
       Function *newFn = duplicateFnArgs(*Fn, Md, DuplicatedInstructionMap);
       DuplicatedFns.insert(newFn);
     }
@@ -1293,10 +1305,11 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     CompiledFuncs.insert(Fn);
     BasicBlock *ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
 
+    LLVM_DEBUG(dbgs() << "function arguments");
     // save the function arguments and their duplicates
     for (int i = 0; i < Fn->arg_size(); i++) {
       Value *Arg, *ArgClone;
-      if (AlternateMemMapEnabled == false) {
+      if (!AlternateMemMapEnabled && !Fn->isVarArg()) {
         if (i >= Fn->arg_size() / 2) {
           break;
         }
@@ -1320,23 +1333,33 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
         }
       }
     }
+    LLVM_DEBUG(dbgs() << " [done]\n");
 
+    LLVM_DEBUG(dbgs() << "Duplicate instructions");
+
+    std::list<Instruction *> InstToDuplicate;
     for (BasicBlock &BB : *Fn) {
       for (Instruction &I : BB) {
-        if (!isValueDuplicated(DuplicatedInstructionMap, I)) {
-          // perform the duplication
-          int shouldDelete =
-              duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
-          // the instruction duplicated may be equal to the original, so we
-          // return shouldDelete in order to drop the duplicates
+        InstToDuplicate.push_back(&I);
+      }
+    }
 
-          // TODO: Why to be done in another phase and not in duplciateInstruction? 
-          if (shouldDelete) {
-            InstructionsToRemove.push_back(&I);
-          }
+    for (Instruction *I : InstToDuplicate) {
+      if (!isValueDuplicated(DuplicatedInstructionMap, *I)) {
+        // perform the duplication
+        int shouldDelete = 
+              duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB);
+
+        // the instruction duplicated may be equal to the original, so we
+        // return shouldDelete in order to drop the duplicates
+
+        // TODO: Why to be done in another phase and not in duplciateInstruction? 
+        if (shouldDelete) {
+          InstructionsToRemove.push_back(I);
         }
       }
     }
+    LLVM_DEBUG(dbgs() << "[done]\n");
 
     // insert the code for calling the error basic block in case of a mismatch
     CreateErrBB(Md, *Fn, ErrBB);
@@ -1379,12 +1402,35 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     }
   }
   
+  for(InvokeInst *IInstr : toFixInvokes) {
+    // Split every toFixInvoke in two different BBs, with the first having the normal continuation 
+    // to the next invoke and both having the same landingpad
+    auto *NewBB = IInstr->getParent()->splitBasicBlockBefore(IInstr->getNextNonDebugInstruction());
+    auto *BrI = NewBB->getTerminator();
+    BrI->removeFromParent();
+    BrI->deleteValue();
+
+    // Update the first invoke's normal destination
+    IInstr->setNormalDest(NewBB->getNextNode());
+  }
+  
   // Drop the instructions that have been marked for removal earlier
   for (Instruction *I2rm : InstructionsToRemove) {
     I2rm->eraseFromParent();
   }
 
   fixGlobalCtors(Md);
+
+  // Fixing calls to default handlers
+  auto *DataCorruptionH = Md.getFunction(getLinkageName(linkageMap, "DataCorruption_Handler"));
+  for(User *U : DataCorruptionH->users()) {
+    if(isa<CallBase>(U)) {
+      CallBase *CallI = cast<CallBase>(U);
+      auto dbgLoc = findNearestDebugLoc(*CallI);
+      if(dbgLoc)
+        CallI->setDebugLoc(dbgLoc);
+    }
+  }
 
   LLVM_DEBUG(dbgs() << "Persisting Compiled Functions...\n");
   persistCompiledFunctions(CompiledFuncs, "compiled_eddi_functions.csv");

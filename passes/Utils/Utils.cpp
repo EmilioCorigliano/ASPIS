@@ -1,5 +1,6 @@
 #include "Utils.h"
 
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -160,28 +161,37 @@ bool shouldCompile(Function &Fn,
 DebugLoc findNearestDebugLoc(Instruction &I) {
   std::list<BasicBlock*> candidates;
 
-  auto *PrevI = I.getPrevNonDebugInstruction();
+  Instruction *PrevI = &I;
 
-  while ((PrevI = PrevI->getPrevNonDebugInstruction())) {
+  while (PrevI != NULL && (PrevI = PrevI->getPrevNonDebugInstruction())) {
     if (auto DL = PrevI->getDebugLoc()) {
       return DL;
     }
   }
 
   for (auto *U : I.getParent()->users()) {
-    candidates.push_back(cast<Instruction>(U)->getParent());
+    if(isa<Instruction>(U)) {
+      candidates.push_back(cast<Instruction>(U)->getParent());
+    }
   }
 
-  for (auto *BB : candidates) {
-    PrevI = BB->getTerminator();
-    while ((PrevI = PrevI->getPrevNonDebugInstruction())) {
-      if (auto DL = PrevI->getDebugLoc()) {
-        return DL;
+  std::list<BasicBlock*> newCandidates{candidates};
+  while(!newCandidates.empty()) {
+    candidates = newCandidates;
+    newCandidates.clear();
+    for (auto *BB : candidates) {
+      PrevI = BB->getTerminator();
+      while (PrevI != NULL && (PrevI = PrevI->getPrevNonDebugInstruction(true))) {
+        if (auto DL = PrevI->getDebugLoc()) {
+          return DL;
+        }
       }
-    }
-    for (auto *U : BB->users()) {
-      if(std::find(candidates.begin(), candidates.end(), cast<Instruction>(U)->getParent()) == candidates.end()) {
-        candidates.push_back(cast<Instruction>(U)->getParent());
+      for (auto *U : BB->users()) {
+        if(isa<Instruction>(U)) {
+          if(std::find(newCandidates.begin(), newCandidates.end(), cast<Instruction>(U)->getParent()) == newCandidates.end()) {
+            newCandidates.push_back(cast<Instruction>(U)->getParent());
+          }
+        }
       }
     }
   }
@@ -236,12 +246,26 @@ StringRef getLinkageName(const LinkageMap &linkageMap, const std::string &functi
 }
 
 bool isIntrinsicToDuplicate(CallBase *CInstr) {
-        Intrinsic::ID intrinsicID = CInstr->getIntrinsicID();
-        if (intrinsicID == Intrinsic::memcpy) {
-            return true; 
-        }    
+  Intrinsic::ID intrinsicID = CInstr->getIntrinsicID();
+  if (intrinsicID == Intrinsic::memcpy) {
+    return true; 
+  } else if(CInstr->getCalledFunction() != NULL && isIntrinsicName(*CInstr->getCalledFunction())) {
+    return true;
+  }
+  
+  return false;
+}
 
-    return false; 
+
+bool isIntrinsicName(Function &Fn) {
+  auto FnName = demangle(Fn.getName().str());
+  // outs() << FnName << " " << FnName.find("std::") << "\n";
+  if(FnName.find("operator new") == 0 || FnName.find("std::") != FnName.npos || FnName.find("fmt::") != FnName.npos) {
+    // outs() << "duplicated\n";
+    return true;
+  }
+
+  return false; 
 }
 
 void createFtFunc(Module &Md, StringRef name) {
