@@ -1277,7 +1277,7 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
       Fn.getArg(i)->removeAttr(Attribute::AttrKind::StructRet);
     }
 
-    if (AlternateMemMapEnabled == false && !Fn.isVarArg()) {
+    if (!AlternateMemMapEnabled && !Fn.isVarArg()) {
       Params[Fn.getArg(i)] = ClonedFunc->getArg(Fn.arg_size() + i);
     } else {
       Params[Fn.getArg(i)] = ClonedFunc->getArg(i * 2);
@@ -1331,7 +1331,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   duplicateGlobals(Md, DuplicatedInstructionMap);
   LLVM_DEBUG(dbgs() << "[done]\n");
 
-  // store the functions that are currently in the module
+  // store the duplicated functions that are currently in the module
   std::set<Function *> DuplicatedFns;
 
   // then duplicate the function arguments using toHardenFunctions
@@ -1339,24 +1339,24 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   for (Function *Fn : toHardenFunctions) {
     // Create dup functions only if the function is declared in this module
     // and isn't just to be duplicated
-    if(!Fn->isDeclaration() && !isIntrinsicName(*Fn)) {
+    if(!Fn->isDeclaration() && !isToDuplicateName(Fn->getName())) {
       Function *newFn = duplicateFnArgs(*Fn, Md, DuplicatedInstructionMap);
       DuplicatedFns.insert(newFn);
     }
   }
-  LLVM_DEBUG(dbgs() << "[done] Creating _dup functions\n");
+  LLVM_DEBUG(dbgs() << "Creating _dup functions [done]\n");
 
   // Fixing the duplicated constructors
   fixDuplicatedConstructors(Md);
 
-  // list of duplicated instructions to remove since they are equal to the
-  // original
-  std::list<Instruction *> InstructionsToRemove;
-  int i = 1;
-  LLVM_DEBUG(dbgs() << "Iterating over the module functions...\n");
+  // list of duplicated instructions to remove since they are equal to the original
+  std::set<Instruction *> InstructionsToRemove;
+  std::set<CallBase *> GrayAreaCallsToFix;
+  int iFn = 1;
+  LLVM_DEBUG(dbgs() << "Iterating over the functions...\n");
 
   for (Function *Fn : DuplicatedFns) {
-    LLVM_DEBUG(dbgs() << "Compiling " << i++ << "/" << DuplicatedFns.size() << ": "
+    LLVM_DEBUG(dbgs() << "Compiling " << iFn++ << "/" << DuplicatedFns.size() << ": "
                       << Fn->getName() << "\n");
     CompiledFuncs.insert(Fn);
     BasicBlock *ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
@@ -1383,9 +1383,16 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
           std::pair<Value *, Value *>(ArgClone, Arg));
       for (User *U : Arg->users()) {
         if (isa<Instruction>(U)) {
+          Instruction *I = cast<Instruction>(U);
           // duplicate the uses of each argument
-          duplicateInstruction(cast<Instruction>(*U),
-                                DuplicatedInstructionMap, *ErrBB);
+          if (duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB)) {
+            if(InstructionsToRemove.find(I) == InstructionsToRemove.end()) {
+              InstructionsToRemove.insert(I);
+              errs() << "Remove instr ( " << *I << " ) from " << *I->getParent()->getParent() << " while duplicating fn args\n";
+            } else {
+              errs() << "Duplicated to remove instr ( " << *I << " ) from " << *I->getParent()->getParent() << " while duplicating fn args\n";
+            }
+          }
         }
       }
     }
@@ -1393,10 +1400,10 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
 
     LLVM_DEBUG(dbgs() << "Duplicate instructions");
 
-    std::list<Instruction *> InstToDuplicate;
+    std::set<Instruction *> InstToDuplicate;
     for (BasicBlock &BB : *Fn) {
       for (Instruction &I : BB) {
-        InstToDuplicate.push_back(&I);
+        InstToDuplicate.insert(&I);
       }
     }
 
@@ -1411,7 +1418,11 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
 
         // TODO: Why to be done in another phase and not in duplciateInstruction? 
         if (shouldDelete) {
-          InstructionsToRemove.push_back(I);
+          if(InstructionsToRemove.find(I) == InstructionsToRemove.end()) {
+            InstructionsToRemove.insert(I);
+          } else {
+            LLVM_DEBUG(dbgs() << "Duplicated to remove instr ( " << *I << " ) from " << *I->getParent()->getParent() << "\n");
+          }
         }
       }
     }
@@ -1421,44 +1432,167 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     CreateErrBB(Md, *Fn, ErrBB);
   }
   
+  LLVM_DEBUG(dbgs() << "Iterating over variables...\n");
   // Duplicate usages of global variables to harden only if not in a _dup function 
   // (already handled in a duplicated function)
   for (Value *V : toHardenVariables) {
+    if(V == NULL) {
+      errs() << "To harden a null var\n";
+      continue;
+    }
+    errs() << "Duplicating variable: " << *V << " in function " << (isa<Instruction>(V) ? cast<Instruction>(V)->getFunction()->getName() : "<not_an_instruction>") << "\n";
     for(User *U : V->users()) {
-      if(isa<StoreInst>(U) || isa<CallBase>(U)) {
-        Instruction *I = cast<Instruction>(U);
+      if(!isa<Instruction>(U)) {
+        errs() << "User is not an instruction " << *U << "\n";
+        continue;
+      }
+
+      Instruction *I = cast<Instruction>(U);        
+      Function *Fn = I->getFunction();
+      
+      // Duplicate instruction only if this isn't an already duplicated function
+      if(!Fn->getName().ends_with("_dup")) {
         BasicBlock *ErrBB = nullptr;
         bool newErrBB = true;
-        
-        Function *Fn = I->getFunction();
-        // Duplicate instruction only if this isn't an already duplicated function
-        if(!Fn->getName().ends_with("_dup")) {
-          // Search pre-existant ErrBB
-          for(BasicBlock &BB : *Fn) {
-            if(BB.getName().starts_with("ErrBB")) {
-              ErrBB = &BB;
-              newErrBB = false; // ErrBB already present
+
+        // Search pre-existant ErrBB
+        for(BasicBlock &BB : *Fn) {
+          if(BB.getName().starts_with("ErrBB")) {
+            ErrBB = &BB;
+            newErrBB = false; // ErrBB already present
+          }
+        }
+
+        if(newErrBB) {
+          ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
+        }
+
+        if(!isa<CallBase>(I)) {
+          if(duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB)) {
+            if(InstructionsToRemove.find(I) == InstructionsToRemove.end()) {
+              InstructionsToRemove.insert(I);
+            } else {
+              LLVM_DEBUG(dbgs() << "Duplicated to remove instr ( " << *I << " ) from " << *I->getParent()->getParent() << "\n");
             }
           }
+        } else {
+          GrayAreaCallsToFix.insert(cast<CallBase>(I));
+        }
 
-          if(newErrBB) {
-            ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
-          }
-
-          if(duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB)) {
-            InstructionsToRemove.push_back(I);
-          }
-
-          if(newErrBB) {
-            // insert the code for calling the error basic block in case of a mismatch
-            CreateErrBB(Md, *Fn, ErrBB);
-          }
+        if(newErrBB) {
+          // insert the code for calling the error basic block in case of a mismatch
+          CreateErrBB(Md, *Fn, ErrBB);
         }
       }
     }
   }
   
+  LLVM_DEBUG(dbgs() << "Fixing gray area calls\n");
+  // Add load of non duplicated instructions and use that as duplciated instr
+  for(CallBase *CInstr : GrayAreaCallsToFix) {
+    LLVM_DEBUG(dbgs() << "Fixing grey area call: " << *CInstr << "\n");
+    // Map with the duplicated instructions, including the temporary load ones
+    std::map<Value *, Value *> TmpDuplicatedInstructionMap{DuplicatedInstructionMap};
+    Function *Fn = CInstr->getFunction();
+    BasicBlock *ErrBB = nullptr;
+    bool newErrBB = true;        
+
+    // Search pre-existant ErrBB
+    for(BasicBlock &BB : *Fn) {
+      if(BB.getName().starts_with("ErrBB")) {
+        ErrBB = &BB;
+        newErrBB = false; // ErrBB already present
+      }
+    }
+
+    if(newErrBB) {
+      ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
+    }
+
+    // Set insertion point for the load instructions
+    IRBuilder<> B(CInstr);
+    B.SetInsertPoint(CInstr);
+
+    // Adding loads for pointer operands if needed
+    for (unsigned i = 0; i < CInstr->arg_size(); i++) {
+      // Populate args and ParamTypes from the original instruction
+      Value *Arg = CInstr->getArgOperand(i);
+
+      // If argument has already a duplicate, nothing to do
+      if(TmpDuplicatedInstructionMap.find(Arg) != TmpDuplicatedInstructionMap.end() || !isa<Instruction>(Arg)) {
+        LLVM_DEBUG(dbgs() << "Argument already duplicated " << *Arg << " for " << *CInstr << "\n");
+        continue;
+      }
+
+      if(Arg->getType()->isPointerTy() && !CInstr->isByValArgument(i) && isa<Instruction>(Arg) && !isa<CallInst>(Arg))
+      {
+        // Create load only if ptr since if it is a value, we can just pass two times the same value
+        const llvm::DataLayout &DL = Md.getDataLayout();
+        Type *ArgType;
+        
+        // https://llvm.org/docs/OpaquePointers.html
+        if(isa<LoadInst>(Arg)) {
+          ArgType = cast<LoadInst>(Arg)->getType();
+        } else if(isa<StoreInst>(Arg)) {
+          ArgType = cast<StoreInst>(Arg)->getValueOperand()->getType();
+        } else if(isa<GetElementPtrInst>(Arg)) {
+          ArgType = cast<GetElementPtrInst>(Arg)->getSourceElementType();
+        } else if(isa<Function>(Arg)) {
+          ArgType = cast<Function>(Arg)->getFunctionType();
+        } else if(isa<AllocaInst>(Arg)) {
+          ArgType = cast<AllocaInst>(Arg)->getAllocatedType();
+        } else if(isa<GlobalValue>(Arg)) {
+          ArgType = cast<GlobalValue>(Arg)->getValueType();
+        } else {
+          errs() << "Type not supported\n";
+        }
+
+        uint64_t SizeInBytes = DL.getTypeAllocSize(ArgType);
+        Value *Size = llvm::ConstantInt::get(B.getInt64Ty(), SizeInBytes);
+        
+        // Alignment (assuming alignment of 1 here; adjust as necessary)
+        llvm::ConstantInt *Align = B.getInt32(Arg->getPointerAlignment(DL).value());
+
+        // Volatility (non-volatile in this example)
+        llvm::ConstantInt *IsVolatile = B.getInt1(false);
+
+        // Create the memcpy call
+        auto CopyArg = B.CreateAlloca(ArgType);
+
+        llvm::CallInst *memcpy_call = B.CreateMemCpy(CopyArg, Arg->getPointerAlignment(DL), Arg, Arg->getPointerAlignment(DL), Size);
+
+        TmpDuplicatedInstructionMap.insert(std::pair<Value *, Value *>(CopyArg, Arg));
+        TmpDuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Arg, CopyArg));
+      } else {
+        // Otherwise pass two times the same arg
+        TmpDuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Arg, Arg));
+        LLVM_DEBUG(dbgs() << "Passing two times same argument: " << *Arg << " for " << *CInstr << "\n");
+      }
+    }
+
+    // Finally, duplicate the call with the temporary DuplicatedInstructionMap
+    if(duplicateInstruction(*CInstr, TmpDuplicatedInstructionMap, *ErrBB)) {
+      if(InstructionsToRemove.find(CInstr) == InstructionsToRemove.end()) {
+        InstructionsToRemove.insert(CInstr);
+      } else {
+        LLVM_DEBUG(dbgs() << "Duplicated to remove instr ( " << *CInstr << " ) from " << *CInstr->getParent()->getParent() << "\n");
+      }
+    }
+
+
+    if(newErrBB) {
+      // insert the code for calling the error basic block in case of a mismatch
+      CreateErrBB(Md, *Fn, ErrBB);
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "Fixing invokes\n");
   for(InvokeInst *IInstr : toFixInvokes) {
+    if(IInstr == NULL) {
+      errs() << "To fix a null invoke\n";
+      continue;
+    }
+
     // Split every toFixInvoke in two different BBs, with the first having the normal continuation 
     // to the next invoke and both having the same landingpad
     auto *NewBB = IInstr->getParent()->splitBasicBlockBefore(IInstr->getNextNonDebugInstruction());
@@ -1470,14 +1604,22 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     IInstr->setNormalDest(NewBB->getNextNode());
   }
   
+  LLVM_DEBUG(dbgs() << "Remove instructions\n");
   // Drop the instructions that have been marked for removal earlier
   for (Instruction *I2rm : InstructionsToRemove) {
+    if(I2rm == NULL) {
+      errs() << "To remove a null instruction\n";
+      continue;
+    }
+
     I2rm->eraseFromParent();
   }
 
+  LLVM_DEBUG(dbgs() << "Fixing global ctors\n");
   fixGlobalCtors(Md);
 
   // Fixing calls to default handlers
+  LLVM_DEBUG(dbgs() << "Fixing DataCorruptionHandlers\n");
   auto *DataCorruptionH = Md.getFunction(getLinkageName(linkageMap, "DataCorruption_Handler"));
   for(User *U : DataCorruptionH->users()) {
     if(isa<CallBase>(U)) {
