@@ -732,9 +732,13 @@ void EDDI::addConsistencyChecks(
                 if (OriginalElem->getType()->isFloatingPointTy()) {
                   CmpInstructions.push_back(
                       B.CreateCmp(CmpInst::FCMP_UEQ, OriginalElem, CopyElem));
-                } else {
+                } else if (OriginalElem->getType()->isIntOrIntVectorTy() || OriginalElem->getType()->isPtrOrPtrVectorTy()) {
                   CmpInstructions.push_back(
                       B.CreateCmp(CmpInst::ICMP_EQ, OriginalElem, CopyElem));
+                } else {
+                  errs() << "Didn't create a comparison for ";
+                  OriginalElem->getType()->print(errs());
+                  errs() << " type\n";
                 }
               }
             }
@@ -745,9 +749,11 @@ void EDDI::addConsistencyChecks(
           if (Original->getType()->isFloatingPointTy()) {
             CmpInstructions.push_back(
                 B.CreateCmp(CmpInst::FCMP_UEQ, Original, Copy));
-          } else {
+          } else if (Original->getType()->isIntOrIntVectorTy() || Original->getType()->isPtrOrPtrVectorTy()) {
             CmpInstructions.push_back(
                 B.CreateCmp(CmpInst::ICMP_EQ, Original, Copy));
+          } else {
+            errs() << "Didn't create a comparison for " << Original->getType() << " type\n";
           }
         }
       }
@@ -932,7 +938,7 @@ bool EDDI::isAllocaForExceptionHandling(AllocaInst &I){
       auto *valueOperand =storeInst->getValueOperand();
       if(isa<CallBase>(valueOperand)){
         CallBase *callInst = cast<CallBase>(valueOperand);
-        if (callInst->getCalledFunction()->getName().equals("__cxa_begin_catch"))
+        if (callInst->getCalledFunction() != NULL && callInst->getCalledFunction()->getName().equals("__cxa_begin_catch"))
         {return true;}
       }
       
@@ -951,7 +957,7 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
   Function *Fn = getFunctionDuplicate(Callee);
 
   if(Callee != NULL && (Fn == NULL || Fn == Callee)) {
-    errs() << "Doesn't exist or already duplicated function: " << Callee->getName() << "\n";
+    errs() << "Doesn't exist or already duplicated function: " << *CInstr << "\n";
     return 0;
   }
 
@@ -1101,7 +1107,11 @@ int EDDI::duplicateInstruction(
 
 #ifdef CHECK_AT_STORES
 #if (SELECTIVE_CHECKING == 1)
-    if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
+    if(I.getParent()->getTerminator() == NULL) {
+      errs() << "Malformed block!\n";
+      I.getParent()->print(errs());
+      errs() << "\n";
+    } else if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
 #endif
       addConsistencyChecks(I, DuplicatedInstructionMap, ErrBB);
 #endif
@@ -1124,7 +1134,11 @@ int EDDI::duplicateInstruction(
 
 // add consistency checks on I
 #ifdef CHECK_AT_BRANCH
-    if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
+    if(I.getParent()->getTerminator() == NULL) {
+      errs() << "Malformed block!\n";
+      I.getParent()->print(errs());
+      errs() << "\n";
+    } else if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
       addConsistencyChecks(I, DuplicatedInstructionMap, ErrBB);
 #endif
   }
@@ -1158,7 +1172,11 @@ int EDDI::duplicateInstruction(
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
 #if (SELECTIVE_CHECKING == 1)
-      if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
+    if(I.getParent()->getTerminator() == NULL) {
+      errs() << "Malformed block!\n";
+      I.getParent()->print(errs());
+      errs() << "\n";
+    } else if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
 #endif
         addConsistencyChecks(I, DuplicatedInstructionMap, ErrBB);
 #endif
@@ -1171,7 +1189,11 @@ int EDDI::duplicateInstruction(
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
 #if (SELECTIVE_CHECKING == 1)
-      if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
+    if(I.getParent()->getTerminator() == NULL) {
+      errs() << "Malformed block!\n";
+      I.getParent()->print(errs());
+      errs() << "\n";
+    } else if (I.getParent()->getTerminator()->getNumSuccessors() > 1)
 #endif
         addConsistencyChecks(I, DuplicatedInstructionMap, ErrBB);
 #endif
