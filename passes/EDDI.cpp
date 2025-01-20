@@ -138,22 +138,20 @@ std::set<Function *> EDDI::getVirtualMethodsFromConstructor(Function *Fn) {
 
     // Extract the array field from the struct
     ConstantStruct *VTableStruct = cast<ConstantStruct>(Initializer);
-    if (VTableStruct->getNumOperands() != 1) {
-      errs() << "Unexpected number of fields in vtable struct.\n";
-      return virtualMethods;
-    }
 
-    Constant *ArrayField = VTableStruct->getOperand(0);
-    if (!isa<ConstantArray>(ArrayField)) {
-      errs() << "Vtable field is not a ConstantArray.\n";
-      return virtualMethods;
-    }
+    for(int i = 0; i < VTableStruct->getNumOperands(); i++) {
+      Constant *ArrayField = VTableStruct->getOperand(i);
+      if (!isa<ConstantArray>(ArrayField)) {
+        errs() << "Vtable field " << i << " is not a ConstantArray.\n";
+        continue;
+      }
 
-    // get virtual functions to harden from vtable
-    for (Value *Elem : cast<ConstantArray>(ArrayField)->operands()) {
-      if (isa<Function>(Elem)) {
-        virtualMethods.insert(cast<Function>(Elem));
-        LLVM_DEBUG(dbgs() << "[REDDI] Found virtual method " << cast<Function>(Elem)->getName() <<  " in " << Fn->getName() << "\n");
+      // get virtual functions to harden from vtable
+      for (Value *Elem : cast<ConstantArray>(ArrayField)->operands()) {
+        if (isa<Function>(Elem)) {
+          virtualMethods.insert(cast<Function>(Elem));
+          // LLVM_DEBUG(dbgs() << "[REDDI] Found virtual method " << cast<Function>(Elem)->getName() <<  " in " << Fn->getName() << "\n");
+        }
       }
     }
   }
@@ -213,47 +211,48 @@ void EDDI::fixDuplicatedConstructors(Module &Md) {
 
       // Extract the array field from the struct
       ConstantStruct *VTableStruct = cast<ConstantStruct>(Initializer);
-      if (VTableStruct->getNumOperands() != 1) {
-        errs() << "Unexpected number of fields in vtable struct.\n";
-        return;
-      }
 
-      Constant *ArrayField = VTableStruct->getOperand(0);
-      if (!isa<ConstantArray>(ArrayField)) {
-        errs() << "Vtable field is not a ConstantArray.\n";
-        return;
-      }
+      std::vector<Constant *> NewArrayRef;
 
-      ConstantArray *FunctionArray = cast<ConstantArray>(ArrayField);
-
-      // Iterate over elements of the array and modify function pointers
-      std::vector<Constant *> ModifiedElements;
-      for (Value *Elem : FunctionArray->operands()) {
-        if (isa<Function>(Elem)) {
-          Function *Func = cast<Function>(Elem);
-          // Replace with the _dup version of the function
-          std::string DupName = Func->getName().str() + "_dup";
-          Function *DupFunction = Md.getFunction(DupName);
-
-          if (DupFunction) {
-            LLVM_DEBUG(dbgs() << "Getting _dup function: " << DupFunction->getName() << "\n");
-            ModifiedElements.push_back(DupFunction);
-          } else {
-            errs() << "Missing _dup function for: " << Func->getName() << "\n";
-            ModifiedElements.push_back(cast<Constant>(Elem)); // Keep the original
-          }
-        } else {
-          // Retain non-function elements
-          ModifiedElements.push_back(cast<Constant>(Elem));
+      for(int i = 0; i < VTableStruct->getNumOperands(); i++) {
+        Constant *ArrayField = VTableStruct->getOperand(i);
+        if (!isa<ConstantArray>(ArrayField)) {
+          errs() << "Vtable field " << i << " is not a ConstantArray.\n";
+          continue;
         }
-      }
 
-      // Create a new ConstantArray with the modified elements
-      ArrayType *ArrayType = FunctionArray->getType();
-      Constant *NewArray = ConstantArray::get(ArrayType, ModifiedElements);
+        ConstantArray *FunctionArray = cast<ConstantArray>(ArrayField);
+
+        // Iterate over elements of the array and modify function pointers
+        std::vector<Constant *> ModifiedElements;
+        for (Value *Elem : FunctionArray->operands()) {
+          if (isa<Function>(Elem)) {
+            Function *Func = cast<Function>(Elem);
+            // Replace with the _dup version of the function
+            std::string DupName = Func->getName().str() + "_dup";
+            Function *DupFunction = Md.getFunction(DupName);
+
+            if (DupFunction) {
+              // LLVM_DEBUG(dbgs() << "Getting _dup function: " << DupFunction->getName() << "\n");
+              ModifiedElements.push_back(DupFunction);
+            } else {
+              errs() << "Missing _dup function for: " << Func->getName() << "\n";
+              ModifiedElements.push_back(cast<Constant>(Elem)); // Keep the original
+            }
+          } else {
+            // Retain non-function elements
+            ModifiedElements.push_back(cast<Constant>(Elem));
+          }
+        }
+
+        // Create a new ConstantArray with the modified elements
+        ArrayType *ArrayType = FunctionArray->getType();
+        Constant *NewArray = ConstantArray::get(ArrayType, ModifiedElements);
+        NewArrayRef.push_back(NewArray);
+      }
 
       // Create a new ConstantStruct for the vtable
-      Constant *NewVTableStruct = ConstantStruct::get(VTableStruct->getType(), NewArray);
+      Constant *NewVTableStruct = ConstantStruct::get(VTableStruct->getType(), NewArrayRef);
 
       // Create a new global variable for the modified vtable
       NewVtable = new GlobalVariable(
