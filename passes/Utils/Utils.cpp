@@ -268,11 +268,11 @@ StringRef getLinkageName(const LinkageMap &linkageMap, const std::string &functi
     }
 }
 
-bool isIntrinsicToDuplicate(CallBase *CInstr) {
+bool isToDuplicate(CallBase *CInstr) {
   Intrinsic::ID intrinsicID = CInstr->getIntrinsicID();
-  if (intrinsicID == Intrinsic::memcpy) {
+  if (intrinsicID != Intrinsic::not_intrinsic) {
     return true; 
-  } else if(CInstr->getCalledFunction() != NULL && isIntrinsicName(*CInstr->getCalledFunction())) {
+  } else if(CInstr->getCalledFunction() != NULL && isToDuplicateName(CInstr->getCalledFunction()->getName())) {
     return true;
   }
   
@@ -280,10 +280,10 @@ bool isIntrinsicToDuplicate(CallBase *CInstr) {
 }
 
 
-bool isIntrinsicName(Function &Fn) {
-  auto FnName = demangle(Fn.getName().str());
+bool isToDuplicateName(StringRef FnMangledName) {
+  auto FnName = demangle(FnMangledName.str());
   // outs() << FnName << " " << FnName.find("std::") << "\n";
-  if(FnName.find("operator new") == 0 || FnName.find("std::") != FnName.npos || FnName.find("fmt::") != FnName.npos) {
+  if(FnName.find("operator new") == 0 || FnName.find("std::") != FnName.npos || FnName.find("fmt::") != FnName.npos || FnName.find("Eigen::") != FnName.npos) {
     // outs() << "duplicated\n";
     return true;
   }

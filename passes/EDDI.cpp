@@ -87,7 +87,6 @@ GlobalVariable* isVTableStore(StoreInst &SInst) {
       auto vtableName = demangle(GV->getName().str());
       // Found "vtable" in name
       if(vtableName.find("vtable") != vtableName.npos) {
-        // LLVM_DEBUG(dbgs() << "[REDDI] CE Vtable name: " << vtableName << " of function " << Fn->getName() << "\n");
         return GV;
       }
     }
@@ -329,7 +328,6 @@ void EDDI::preprocess(Module &Md) {
   for (auto &alias : Md.aliases()) {
     auto aliasee = alias.getAliaseeObject();
     if(isa<Function>(aliasee)){
-      LLVM_DEBUG(dbgs() << "[REDDI] Replacing uses of " << alias.getName() <<  " to " << aliasee->getName() << "\n");
       alias.replaceAllUsesWith(aliasee);
     }
   }
@@ -364,25 +362,53 @@ void EDDI::preprocess(Module &Md) {
     std::set<Value *> toAddVariables; // support set to contain new to-be-checked values
     for(Value *V : toCheckVariables) {
       for(User *U : V->users()) {
-        if(isa<StoreInst>(U)) { 
-          // If the user is a store instruction, should be hardened also the value operand (if it isn't the already checked variable)
-          auto *value = cast<StoreInst>(U)->getValueOperand();
-          // Add value to be protected if never encountered before
-          if(value != NULL && value != V && toHardenVariables.find(value) == toHardenVariables.end() && toCheckVariables.find(value) == toCheckVariables.end()) {
-            toAddVariables.insert(value);
-            LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through store): " << " (called by " << cast<StoreInst>(U)->getOperand(0)->getName() << ")\n");
+        if(isa<Instruction>(U)) {
+          Instruction *Instr = cast<Instruction>(U);
+
+          // If it is a call, add also the called function in the toHardenFunction set
+          if(isa<CallBase>(U)) {
+            CallBase *CallI = cast<CallBase>(U);     
+            Function *Fn = CallI->getCalledFunction();  
+            if (Fn != NULL && getFunctionDuplicate(Fn) == NULL && 
+                  (FuncAnnotations.find(Fn) == FuncAnnotations.end() || 
+                    (!FuncAnnotations.find(Fn)->second.startswith("exclude") && !FuncAnnotations.find(Fn)->second.startswith("to_duplicate"))) && 
+                  !isToDuplicateName(Fn->getName())) {
+              // If it isn't/hasn't a duplicate version already
+              toHardenFunctions.insert(Fn);
+              // LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
+            } else {
+              continue;
+              // LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
+            }
           }
-        } else if(isa<LoadInst>(U)) {
-          toAddVariables.insert(cast<LoadInst>(U));
-          LLVM_DEBUG(dbgs() << "[REDDI] Function to harden (through load): " << " (called by " << cast<LoadInst>(U)->getName() << ")\n");
-        } else if(isa<CallBase>(U)) {        
-          Function *Fn = cast<CallBase>(U)->getCalledFunction();  
-          if (Fn != NULL && getFunctionDuplicate(Fn) == NULL) {
-            // If it isn't/hasn't a duplicate version already
-            toHardenFunctions.insert(Fn);
-            LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
-          } else {
-            LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
+
+          // Add all the operands if never encountered before, if the operand can be considered "an alias" of the variable to be protected
+          if(isa<StoreInst>(Instr) || isa<LoadInst>(Instr) || isa<GetElementPtrInst>(Instr)) {
+            // Add return value to be protected if never encountered before
+            if(U != NULL && isa<Instruction>(U) && U != V && 
+                  toHardenVariables.find(U) == toHardenVariables.end() && 
+                  toCheckVariables.find(U) == toCheckVariables.end() && 
+                  (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
+                  (!U->hasName() || !isToDuplicateName(U->getName()))) {
+              toAddVariables.insert(cast<Instruction>(U));
+              LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden return added " << *cast<Instruction>(U) << ": " << *Instr << "\n");
+            } else {
+              // LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden return NOT added: " << *Instr << "\n");
+            }
+
+            for(auto operand : Instr->operand_values()) {
+              // Add value to be protected if never encountered before
+              if(operand != NULL && operand != V && isa<Instruction>(operand) &&
+                    toHardenVariables.find(operand) == toHardenVariables.end() && 
+                    toCheckVariables.find(operand) == toCheckVariables.end() && 
+                    (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
+                    (!U->hasName() || !isToDuplicateName(U->getName()))) {
+                toAddVariables.insert(operand);
+                LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden added " << *operand << ": " << *Instr << "\n");
+              } else {
+                // LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden NOT added: " << *Instr << "\n");
+              }
+            }
           }
         }
       }
@@ -401,10 +427,9 @@ void EDDI::preprocess(Module &Md) {
     for(Function *Fn : JustAddedFns) {
       // Check if it is a constructor
       std::string DemangledName = demangle(Fn->getName().str());
-      if(std::regex_match(DemangledName, ConstructorRegex) && getFunctionDuplicate(Fn) == NULL) {
+      if(std::regex_match(DemangledName, ConstructorRegex)) {
         // Add it to the toHardenConstructors set and retrieve all its virtualMethods
         // if it isn't/hasn't a duplicate version already
-        LLVM_DEBUG(dbgs() << "[REDDI] CONSTRUCTOR: " << Fn->getName() << " -> " << DemangledName << "\n");
         toHardenConstructors.insert(Fn);
         toAddFns.merge(getVirtualMethodsFromConstructor(Fn));
       }
@@ -424,15 +449,15 @@ void EDDI::preprocess(Module &Md) {
                 (JustAddedFns.find(CalledFn) != JustAddedFns.end() ? " (already in JustAddedFns)" : "") <<
                 "\n");
               if(to_harden && toHardenFunctions.find(CalledFn) == toHardenFunctions.end() && 
-                JustAddedFns.find(CalledFn) == JustAddedFns.end() && getFunctionDuplicate(CalledFn) == NULL) {
+                JustAddedFns.find(CalledFn) == JustAddedFns.end() && getFunctionDuplicate(CalledFn) == NULL && (FuncAnnotations.find(CalledFn) == FuncAnnotations.end() || !FuncAnnotations.find(CalledFn)->second.startswith("exclude"))) {
                 // If is a new function to and it isn't/hasn't a duplicate version
                 toAddFns.insert(CalledFn);
-                LLVM_DEBUG(dbgs() << "[REDDI] Added: " << CalledFn->getName() << "\n");
+                // LLVM_DEBUG(dbgs() << "[REDDI] Added: " << CalledFn->getName() << "\n");
               }
             } else {
-              LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << Fn->getName() << ")\n");
-              I.print(errs());
-              errs() << "\n";
+              // LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << Fn->getName() << ")\n");
+              // I.print(errs());
+              // errs() << "\n";
             }
           }
         }

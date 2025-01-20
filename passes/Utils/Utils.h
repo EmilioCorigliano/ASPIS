@@ -51,8 +51,8 @@ DebugLoc findNearestDebugLoc(Instruction &I);
 LinkageMap mapFunctionLinkageNames(const Module &M);
 void printLinkageMap(const LinkageMap &linkageMap);
 StringRef getLinkageName(const LinkageMap &linkageMap, const std::string &functionName);
-bool isIntrinsicName(Function &Fn);
-bool isIntrinsicToDuplicate(CallBase *CInstr);
+bool isToDuplicateName(StringRef FnMangledName);
+bool isToDuplicate(CallBase *CInstr);
 
 void createFtFuncs(Module &Md);
 
