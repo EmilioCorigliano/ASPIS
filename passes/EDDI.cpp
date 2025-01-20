@@ -1143,18 +1143,18 @@ int EDDI::duplicateInstruction(
 #endif
   }
 
-  // if the istruction is a call, we duplicate the operands and add consistency
+  // if the istruction is a non-already-duplicated call, we duplicate the operands and add consistency
   // checks
-  else if (isa<CallBase>(I)) {
+  else if (isa<CallBase>(I) && DuplicatedCalls.find(&I) == DuplicatedCalls.end()) {
+    DuplicatedCalls.insert(&I);
     CallBase *CInstr = cast<CallBase>(&I);
     // there are some instructions that can be annotated with "to_duplicate" in
     // order to tell the pass to duplicate the function call.
     Function *Callee = CInstr->getCalledFunction();
     Callee = getFunctionFromDuplicate(Callee);
     // check if the function call has to be duplicated
-    if ((FuncAnnotations.find(Callee) != FuncAnnotations.end() &&
-         (*FuncAnnotations.find(Callee)).second.startswith("to_duplicate")) ||
-        isIntrinsicToDuplicate(CInstr)) {
+    if ((FuncAnnotations.find(Callee) != FuncAnnotations.end() && FuncAnnotations.find(Callee)->second.startswith("to_duplicate")) ||
+        isToDuplicate(CInstr)) {
       // duplicate the instruction
       cloneInstr(*CInstr, DuplicatedInstructionMap);
 
@@ -1166,7 +1166,6 @@ int EDDI::duplicateInstruction(
         // it would jump to the next BB and not to the duplicated invoke instruction
         auto *IInstr = &cast<InvokeInst>(I);
         toFixInvokes.insert(IInstr);
-        LLVM_DEBUG(dbgs() << "To fix duplicated invoke inst in " << IInstr->getParent()->getParent()->getName() << "\n");
       }
 
 // add consistency checks on I
@@ -1201,11 +1200,11 @@ int EDDI::duplicateInstruction(
       IRBuilder<> B(CInstr);
       if (!isa<InvokeInst>(CInstr) && I.getNextNonDebugInstruction()) {
         B.SetInsertPoint(I.getNextNonDebugInstruction());
-      } else if(cast<InvokeInst>(CInstr)->getNormalDest()) {
+      } else if(isa<InvokeInst>(CInstr) && cast<InvokeInst>(CInstr)->getNormalDest()) {
         B.SetInsertPoint(
             &*cast<InvokeInst>(CInstr)->getNormalDest()->getFirstInsertionPt());
       } else {
-        LLVM_DEBUG(errs() << "Can't set insert point!\n");
+        errs() << "Can't set insert point! " << I << "\n";
         abort();
       }
       // get the function with the duplicated signature, if it exists
@@ -1213,7 +1212,7 @@ int EDDI::duplicateInstruction(
       // if the _dup function exists (and it is not itself the dup version) or is an indirect call, 
       // we substitute the call instruction with a call to the function with duplicated arguments
       if (CInstr->getCalledFunction() == NULL || (Fn != NULL && Fn != CInstr->getCalledFunction())) {
-        res = transformCallBaseInst(CInstr, DuplicatedInstructionMap, B);
+        res = transformCallBaseInst(CInstr, DuplicatedInstructionMap, B, ErrBB);
       } else {
         fixFuncValsPassedByReference(*CInstr, DuplicatedInstructionMap, B);
       }
