@@ -38,6 +38,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::set<Function*> toHardenConstructors;
         std::set<Function*> toHardenFunctions;
         std::set<Value*> toHardenVariables;
+        std::set<Value*> DuplicatedCalls;
         
         LinkageMap linkageMap;
 
@@ -51,7 +52,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         Value* comparePtrs(Value &V1, Value &V2, IRBuilder<> &B);
         void addConsistencyChecks(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
         void fixFuncValsPassedByReference(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, IRBuilder<> &B);
-        int transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap, IRBuilder<> &B) ;
+        int transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap, IRBuilder<> &B, BasicBlock &ErrBB) ;
         Function *getFunctionDuplicate(Function *Fn);
         Function *getFunctionFromDuplicate(Function *Fn);
         void duplicateGlobals (Module &Md, std::map<Value *, Value *> &DuplicatedInstructionMap);

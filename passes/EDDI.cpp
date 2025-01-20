@@ -55,7 +55,7 @@ using namespace llvm;
 // #define CHECK_AT_BRANCH
 
 // Regex to match constructors: the class name should be the same of the function name
-std::regex ConstructorRegex(R"(([\w]+)::\1\((.*?)\)$)"); 
+std::regex ConstructorRegex(R"(.*([\w]+)::\1\((.*?)\))");
 
 std::set<InvokeInst *> toFixInvokes;
 
@@ -918,13 +918,18 @@ bool EDDI::isAllocaForExceptionHandling(AllocaInst &I){
 }
 
 int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap,
-    IRBuilder<> &B) {
+    IRBuilder<> &B, BasicBlock &ErrBB) {
   int res = 0;
   SmallVector<Value *, 6> args;
   SmallVector<Type *, 6> ParamTypes;
   
   Function *Callee = CInstr->getCalledFunction();
   Function *Fn = getFunctionDuplicate(Callee);
+
+  if(Callee != NULL && (Fn == NULL || Fn == Callee)) {
+    errs() << "Doesn't exist or already duplicated function: " << Callee->getName() << "\n";
+    return 0;
+  }
 
   for (unsigned i = 0; i < CInstr->arg_size(); i++) {
     // Populate args and ParamTypes from the original instruction
@@ -939,13 +944,17 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
     if (!AlternateMemMapEnabled && (Callee == NULL || !Callee->isVarArg())) {
       args.insert(args.begin() + i, Copy);
       args.push_back(Arg);
-      ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
-      ParamTypes.push_back(Arg->getType());
+      if(Callee == NULL) {
+        ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
+        ParamTypes.push_back(Arg->getType());
+      }
     } else {
       args.push_back(Copy);
       args.push_back(Arg);
-      ParamTypes.push_back(Arg->getType());
-      ParamTypes.push_back(Arg->getType());
+      if(Callee == NULL) {
+        ParamTypes.push_back(Arg->getType());
+        ParamTypes.push_back(Arg->getType());
+      }
     }
   }
 
@@ -973,13 +982,15 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
     for (unsigned i = 0; i < CInstr->arg_size(); ++i) {
       AttributeSet ParamAttrs = CInstr->getAttributes().getParamAttrs(i);
       for(auto &attr : ParamAttrs) {
-        // Assuming that indirect function calls aren't variadic
-        if (!AlternateMemMapEnabled) {
-          cast<CallBase>(NewCInstr)->addParamAttr(i, attr);
-          cast<CallBase>(NewCInstr)->addParamAttr(i + CInstr->arg_size(), attr);
-        } else {
-          cast<CallBase>(NewCInstr)->addParamAttr(i*2, attr);
-          cast<CallBase>(NewCInstr)->addParamAttr(i*2 + 1 , attr);
+        if(attr.getKindAsEnum() != Attribute::AttrKind::StructRet){
+          // Assuming that indirect function calls aren't variadic
+          if (!AlternateMemMapEnabled) {
+            cast<CallBase>(NewCInstr)->addParamAttr(i, attr);
+            cast<CallBase>(NewCInstr)->addParamAttr(i + CInstr->arg_size(), attr);
+          } else {
+            cast<CallBase>(NewCInstr)->addParamAttr(i*2, attr);
+            cast<CallBase>(NewCInstr)->addParamAttr(i*2 + 1 , attr);
+          }
         }
       }
     }
@@ -994,7 +1005,7 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
 
     // Remove original instruction since we created the duplicated version
     res = 1;
-  } else if (Fn != NULL && Fn != Callee) {
+  } else {
     Instruction *NewCInstr;
     IRBuilder<> CallBuilder(CInstr);
     if (isa<InvokeInst>(CInstr)) {
