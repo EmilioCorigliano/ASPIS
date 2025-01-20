@@ -37,7 +37,7 @@ void getFuncAnnotations(Module &Md, std::map<Value*, StringRef> &FuncAnnotations
  * @param GO The Global Object to which the new annotation is added
  * @param AnnotationStringGlobal The GlobalVariable representing the annotation to add
  */
-void addAnnotation(Module &Md, GlobalObject &GO, GlobalVariable *AnnotationStringGlobal);
+void addAnnotation(Module &Md, GlobalObject &GO, GlobalVariable *AnnotationStringGlobal, std::map<Value*, StringRef> FuncAnnotations);
 
 // Inserts the names of the compiled functions as a csv into the file passed as parameter
 void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* filename);

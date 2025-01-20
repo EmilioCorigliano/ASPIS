@@ -1,8 +1,8 @@
 add_subdirectory(Utils Utils)
 
-# MarkToExclude 
-add_library(MarkToExclude SHARED
-    MarkToExclude.cpp
+# AddAnnotation 
+add_library(AddAnnotation SHARED
+    AddAnnotation.cpp
     Utils/Utils.cpp 
 )
 

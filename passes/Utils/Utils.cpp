@@ -72,7 +72,7 @@ void getFuncAnnotations(Module &Md, std::map<Value*, StringRef> &FuncAnnotations
   }
 }
 
-void addAnnotation(Module &M, GlobalObject &GV, GlobalVariable *AnnotationStringGlobal) {
+void addAnnotation(Module &M, GlobalObject &GV, GlobalVariable *AnnotationStringGlobal, std::map<Value*, StringRef> FuncAnnotations) {
     LLVMContext &Context = M.getContext();
 
     // Create the new annotation struct fields.
@@ -146,6 +146,13 @@ void addAnnotation(Module &M, GlobalObject &GV, GlobalVariable *AnnotationString
 
     // Set the section to match the original.
     NewGlobalAnnotations->setSection(Section);
+
+    if(isa<Value>(GV) && isa<ConstantDataArray>(AnnotationStringGlobal->getOperand(0))) {
+      FuncAnnotations.insert(std::pair<Value*, StringRef>(
+        &cast<Value>(GV), 
+        cast<ConstantDataArray>(AnnotationStringGlobal->getOperand(0))->getAsString())
+      );
+    }
 }
 
 void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* filename) {

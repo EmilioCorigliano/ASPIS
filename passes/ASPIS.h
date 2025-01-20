@@ -89,8 +89,13 @@ class DuplicateGlobals : public PassInfoMixin<DuplicateGlobals> {
 /**
  * @brief Pass which fixes all the calls to protected functions in non-protected sources and duplicates 
  */
-class MarkToExclude : public PassInfoMixin<MarkToExclude> {
+class AddAnnotation : public PassInfoMixin<AddAnnotation> {
+    private:
+        std::string annotation;
     public:
+        AddAnnotation(std::string annotation) : annotation(annotation) 
+        {}
+
         PreservedAnalyses run(Module &M,
                               ModuleAnalysisManager &);
 
