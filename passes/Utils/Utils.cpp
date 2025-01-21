@@ -220,8 +220,7 @@ DebugLoc findNearestDebugLoc(Instruction &I) {
   }
 
   errs() << "Could not find nearest debug location! Aborting compilation.\n";
-  errs() << I << "\n";
-  abort();
+  errs() << *I.getParent()->getParent() << "\n";
   return nullptr;
 }
 
@@ -259,7 +258,7 @@ StringRef getLinkageName(const LinkageMap &linkageMap, const std::string &functi
     // Check if the function name exists in the map
     if (it != linkageMap.end() && !it->second.empty()) {
         // Return the first linkage name from the vector
-        DEBUG_WITH_TYPE("linkage_verification",dbgs() << "Linkage name given to "<<functionName <<": " << it->second.front() << "\n");
+        // DEBUG_WITH_TYPE("linkage_verification",dbgs() << "Linkage name given to "<<functionName <<": " << it->second.front() << "\n");
         return it->second.front();
     } else {
         // Return an empty StringRef if the function name or linkage name is not found

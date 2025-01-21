@@ -199,8 +199,6 @@ void EDDI::fixDuplicatedConstructors(Module &Md) {
 
     // Duplicate vtable
     if(vtable) {
-      LLVM_DEBUG(dbgs() << "[REDDI] Duplicating vtable: " << vtable->getName() << " of function " << FnDup->getName() << "\n");
-      
       // Ensure the vtable global variable has an initializer
       Constant *Initializer = vtable->getInitializer();
       if (!Initializer || !isa<ConstantStruct>(Initializer)) {
@@ -344,12 +342,8 @@ void EDDI::preprocess(Module &Md) {
       if(isa<Function>(x.first) && getFunctionDuplicate(cast<Function>(x.first)) == NULL) {
         // If is a function and it isn't/hasn't a duplicate version already
         toHardenFunctions.insert(cast<Function>(x.first));
-        LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << x.first->getName() << "\n");
       } else if(isa<Value>(x.first)) {
         toHardenVariables.insert(cast<Value>(x.first));
-        LLVM_DEBUG(dbgs() << "[REDDI] GlobalVariable to harden: " << x.first->getName() << "\n");
-      } else {
-        LLVM_DEBUG(errs() << "[REDDI] OTHER to harden: " << x.first->getName() << "\n");
       }
     };
   }
@@ -391,9 +385,6 @@ void EDDI::preprocess(Module &Md) {
                   (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
                   (!U->hasName() || !isToDuplicateName(U->getName()))) {
               toAddVariables.insert(cast<Instruction>(U));
-              LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden return added " << *cast<Instruction>(U) << ": " << *Instr << "\n");
-            } else {
-              // LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden return NOT added: " << *Instr << "\n");
             }
 
             for(auto operand : Instr->operand_values()) {
@@ -404,9 +395,6 @@ void EDDI::preprocess(Module &Md) {
                     (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
                     (!U->hasName() || !isToDuplicateName(U->getName()))) {
                 toAddVariables.insert(operand);
-                LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden added " << *operand << ": " << *Instr << "\n");
-              } else {
-                // LLVM_DEBUG(dbgs() << "[REDDI] Variable to harden NOT added: " << *Instr << "\n");
               }
             }
           }
@@ -1290,11 +1278,16 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
   return ClonedFunc;
 }
 
+/**
+ * @brief Recursively searches for the value type, returning its type and alignment
+ * @param Arg [In] Pointer to the value we want to analyze
+ * @param ArgAlign [Out] The found alignment 
+ * @return The Type of Arg, if found. VoidTy otherwise
+ */
 Type *getValueType(Value *Arg, Align *ArgAlign) {
 
   // https://llvm.org/docs/OpaquePointers.html
   while(true) {
-    outs() << "Checking " << *Arg << "\n";
     if(isa<CallInst>(Arg) && !cast<CallInst>(Arg)->isIndirectCall() && demangle(cast<CallInst>(Arg)->getCalledFunction()->getName().str()).find("operator new") == 0) {
       Value *Size = cast<CallInst>(Arg)->getArgOperand(0);
       if(isa<ConstantInt>(Size)) {
@@ -1514,8 +1507,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
         if (shouldDelete) {
           if(InstructionsToRemove.find(I) == InstructionsToRemove.end()) {
             InstructionsToRemove.insert(I);
-          } else {
-            LLVM_DEBUG(dbgs() << "Duplicated to remove instr ( " << *I << " ) from " << *I->getParent()->getParent() << "\n");
           }
         }
       }
@@ -1534,10 +1525,10 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
       errs() << "To harden a null var\n";
       continue;
     }
-    errs() << "Duplicating variable: " << *V << " in function " << (isa<Instruction>(V) ? cast<Instruction>(V)->getFunction()->getName() : "<not_an_instruction>") << "\n";
+
     for(User *U : V->users()) {
       if(!isa<Instruction>(U)) {
-        errs() << "User is not an instruction " << *U << "\n";
+        // If User is not an instruction continue to next user
         continue;
       }
 
@@ -1565,8 +1556,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
           if(duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB)) {
             if(InstructionsToRemove.find(I) == InstructionsToRemove.end()) {
               InstructionsToRemove.insert(I);
-            } else {
-              LLVM_DEBUG(dbgs() << "Duplicated to remove instr ( " << *I << " ) from " << *I->getParent()->getParent() << "\n");
             }
           }
         } else {
@@ -1582,9 +1571,8 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   }
   
   LLVM_DEBUG(dbgs() << "Fixing gray area calls\n");
-  // Add load of non duplicated instructions and use that as duplciated instr
+  // Add alloca and memcpy of non duplicated instructions and use that as duplciated instr
   for(CallBase *CInstr : GrayAreaCallsToFix) {
-    LLVM_DEBUG(dbgs() << "Fixing grey area call: " << *CInstr << "\n");
     // Map with the duplicated instructions, including the temporary load ones
     std::map<Value *, Value *> TmpDuplicatedInstructionMap{DuplicatedInstructionMap};
     Function *Fn = CInstr->getFunction();
@@ -1607,26 +1595,24 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     IRBuilder<> B(CInstr);
     B.SetInsertPoint(CInstr);
 
-    // Adding loads for pointer operands if needed
     for (unsigned i = 0; i < CInstr->arg_size(); i++) {
       // Populate args and ParamTypes from the original instruction
       Value *Arg = CInstr->getArgOperand(i);
 
       // If argument has already a duplicate, nothing to do
       if(TmpDuplicatedInstructionMap.find(Arg) != TmpDuplicatedInstructionMap.end() || !isa<Instruction>(Arg)) {
-        LLVM_DEBUG(dbgs() << "Argument already duplicated " << *Arg << " for " << *CInstr << "\n");
+        // If Argument already duplicated continue to next argument
         continue;
       }
-
+      
+      // Create alloca and memcpy only if ptr since if it is a value, we can just pass two times the same value
       if(Arg->getType()->isPointerTy() && !CInstr->isByValArgument(i) && isa<Instruction>(Arg) && !isa<CallInst>(Arg))
       {
-        // Create load only if ptr since if it is a value, we can just pass two times the same value
         const llvm::DataLayout &DL = Md.getDataLayout();
         Type *ArgType;
         
         Align ArgAlign;
         ArgType = getValueType(Arg, &ArgAlign);
-        outs() << "Type: " << *ArgType << ", Align: " << ArgAlign.value() << ", instr: " << *Arg << "\n";
 
         uint64_t SizeInBytes = DL.getTypeAllocSize(ArgType);
         Value *Size = llvm::ConstantInt::get(B.getInt64Ty(), SizeInBytes);
@@ -1647,7 +1633,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
       } else {
         // Otherwise pass two times the same arg
         TmpDuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Arg, Arg));
-        LLVM_DEBUG(dbgs() << "Passing two times same argument: " << *Arg << " for " << *CInstr << "\n");
       }
     }
 
@@ -1655,8 +1640,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     if(duplicateInstruction(*CInstr, TmpDuplicatedInstructionMap, *ErrBB)) {
       if(InstructionsToRemove.find(CInstr) == InstructionsToRemove.end()) {
         InstructionsToRemove.insert(CInstr);
-      } else {
-        LLVM_DEBUG(dbgs() << "Duplicated to remove instr ( " << *CInstr << " ) from " << *CInstr->getParent()->getParent() << "\n");
       }
     }
 
@@ -1728,25 +1711,13 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
  */
 void EDDI::fixNonDuplicatedFunctions(Module &Md, std::map<Value *, Value *> DuplicatedInstructionMap, std::set<Function *> DuplicatedFns){
   for(auto &Fn : Md){
-    LLVM_DEBUG(dbgs() << "[EDDI] Fixing " << Fn.getName() << "\n");
-
     for(auto &B : Fn){
       for(auto &I : B){
         if(isa<CallBase>(I) ){
           CallBase &ICall = cast<CallBase>(I);
           Function *calledFn = ICall.getCalledFunction();
 
-          // Function *DupFn = Md.getFunction(calledFn->getName().str() + "_dup");
-          // if (DupFn != NULL) {
-          //   outs() << "[EDDI] Fixing (duplicating): " << Fn.getName() << "\n";
-          //   // If duplicated function call the _dup variant
-          //   BasicBlock *ErrBB = BasicBlock::Create(Fn.getContext(), "ErrBB", &Fn);
-          //   duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
-          //   CreateErrBB(Md, Fn, ErrBB);
-          // }
-
           if(DuplicatedFns.find(calledFn) !=  DuplicatedFns.end()){
-            outs() << "[EDDI] Fixing (duplicating): " << Fn.getName() << " called " << calledFn->getName() << "\n";
             // If duplicated function call the _dup variant
             BasicBlock *ErrBB = BasicBlock::Create(Fn.getContext(), "ErrBB", &Fn);
             duplicateInstruction(I, DuplicatedInstructionMap, *ErrBB);
@@ -1755,10 +1726,7 @@ void EDDI::fixNonDuplicatedFunctions(Module &Md, std::map<Value *, Value *> Dupl
             if (calledFn != NULL && calledFn->hasName()) {
               Function *OriginalFn = Md.getFunction(calledFn->getName().str() + "_original");
               if (OriginalFn != NULL) {
-                outs() << "[EDDI] Fixing (original): " << Fn.getName() << " called " << calledFn->getName() << " to " << OriginalFn->getName() << "\n";
                 ICall.setCalledFunction(OriginalFn);
-              } else {
-                outs() << "[EDDI] Fixing (original): " << Fn.getName() << " called " << calledFn->getName() << " NOT CHANGED\n";
               }
             }
           }
@@ -1805,7 +1773,6 @@ void EDDI::CreateErrBB(Module &Md, Function &Fn, BasicBlock *ErrBB){
     }
 
 void EDDI::fixGlobalCtors(Module &M) {
-  LLVM_DEBUG(dbgs() << "[EDDI] Fixing global constructors\n");
   LLVMContext &Context = M.getContext();
 
   // Retrieve the existing @llvm.global_ctors.
