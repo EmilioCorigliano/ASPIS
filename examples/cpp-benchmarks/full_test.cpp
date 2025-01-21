@@ -1,16 +1,28 @@
 #include <iostream>
 #include <string>
 #include <stdexcept> 
+#include "full_test.h"
 
 void DataCorruption_Handler()
 {
+    printf("DataCorruption_Handler\n");
     while(1);
 }
 
 void SigMismatch_Handler()
 {
+    printf("SigMismatch_Handler\n");
     while(1);
 }
+
+float relAltitude(float pressure, float pressureRef, float temperatureRef)
+{
+    return temperatureRef / 0.0065f * (1 - std::powf(pressure / pressureRef, 0.19026119f));
+}
+
+// testing unexpected special variable
+static Class staticClassToHarden;
+// static Class __attribute__((annotate("to_harden"))) staticClassToHarden;
 
 // Simple function
 void simpleFunction() {
@@ -32,57 +44,45 @@ double multiply(double a, double b) {
 }
 
 // Class with member functions and constructor
-class MyClass {
-public:
-    MyClass(int x, int y) : a(x), b(y) {}
-    
-    // Member function
-    int sum() const {
-        return a + b;
-    }
-    
-    // Virtual function for testing polymorphism
-    virtual void print() const {
-        std::cout << "MyClass: a = " << a << ", b = " << b << std::endl;
-    }
+MyClass::MyClass(int x, int y) : a(x), b(y) {}
 
-protected:
-    int a, b;
-};
-
-// Derived class overriding a virtual function
-class DerivedClass : public MyClass {
-public:
-    DerivedClass(int x, int y, int z) : MyClass(x, y), c(z) {}
-
-    // Override virtual function
-    void print() const override {
-        std::cout << "DerivedClass: a = " << a << ", b = " << b << ", c = " << c << std::endl;
-    }
-
-private:
-    int c;
-};
-
-// Template function
-template <typename T>
-T square(T x) {
-    return x * x;
+MyClass::MyClass(Class *c) {
+    printf("Start of constructor\n");
+    std::cout << "x1: " << c->state.x1 << "\n";
+    std::cout << "x2: " << c->state.x2 << "\n";
+    a = c->state.x1;
+    std::cout << "a: " << a << "\n";
+    b = c->state.x2;
+    std::cout << "b: " << b << "\n";
 }
 
-// Template class
-template <typename T>
-class TemplateClass {
-public:
-    TemplateClass(T x, T y) : a(x), b(y) {}
-    
-    T product() const {
-        return a * b;
-    }
+// Member function
+int MyClass::sum() const {
+    return a + b;
+}
 
-private:
-    T a, b;
-};
+// Virtual function for testing polymorphism
+void MyClass::print(Class &c) const {
+    std::cout << "MyClass: a = " << a << ", b = " << b << std::endl;
+}
+
+
+bool MyClass::start() {
+    Class c;
+    print(c);
+
+    return true;
+}
+
+// Derived class overriding a virtual function
+Main::DerivedClass::DerivedClass(int x, int y, int z) : MyClass(x, y), c(z) {
+    bho = new Class();
+}
+
+// Override virtual function
+void Main::DerivedClass::print(Class &cl) const {
+    std::cout << "DerivedClass: a = " << a << ", b = " << b << ", c = " << c << std::endl;
+}
 
 // Recursive function
 int factorial(int n) {
@@ -99,30 +99,24 @@ void riskyFunction(bool throwException) {
 }
 
 // Sret
-struct State
-{
-    double x0;
-    float x1;
-    float x2;
-    float x3;
-};
-
-class Class
-{
-public:
-    Class() {
-        std::cout << "Class constructor" << std::endl;
-        state = {1.0, 2.f, 3.f, 4.f};
+Class::Class() {
+    printf("Class constructor\n");
+    state = {1.0, 2.f, 3.f, 4.f};
+    if(false) {
+        throw 1;
     }
+}
 
-    State testSretDuplication(){
-        return state;
+State Class::testSretDuplication(){
+    printf("testSretDuplication\n");
+    bool callRecursive = (this != &staticClassToHarden);
+    printf("Condition calculated: %d\n", callRecursive);
+    if(callRecursive) {
+        printf("Calling recursive testSretDuplication\n");
+        staticClassToHarden.testSretDuplication();
     }
-
-private:
-    State state;
-};
-
+    return state;
+}
 
 // noexcept
 void TestNoExcept() noexcept
@@ -130,64 +124,7 @@ void TestNoExcept() noexcept
     volatile MyClass m_data(1,2);
 }
 
-// testing unexpected special variable
-static Class staticClass;
-
-int main() {
-    std::cout << "Starting main" << std::endl;
-
-    std::cout << "staticClass: " << staticClass.testSretDuplication().x3 << std::endl;
-
-    // Call simple function
+// void simpleToHardenFunction() __attribute__((annotate("to_harden"))) {
+void simpleToHardenFunction() {
     simpleFunction();
-    
-    // Call function with parameters
-    std::cout << "Add 3 + 4 = " << add(3, 4) << std::endl;
-    
-    // Call overloaded functions
-    std::cout << "Multiply 3 * 4 = " << multiply(3, 4) << std::endl;
-    std::cout << "Multiply 2.5 * 4.5 = " << multiply(2.5, 4.5) << std::endl;
-
-    // Test class and member function
-    MyClass myObj(5, 7);
-    std::cout << "Sum of MyClass: " << myObj.sum() << std::endl;
-    myObj.print();
-    
-    // Test derived class with overridden virtual function
-    DerivedClass derivedObj(3, 6, 9);
-    derivedObj.print();
-
-    // Test template function
-    std::cout << "Square of 5: " << square(5) << std::endl;
-    std::cout << "Square of 2.5: " << square(2.5) << std::endl;
-
-    // Test template class
-    TemplateClass<int> intObj(3, 4);
-    TemplateClass<double> doubleObj(2.5, 3.5);
-    std::cout << "Product of intObj: " << intObj.product() << std::endl;
-    std::cout << "Product of doubleObj: " << doubleObj.product() << std::endl;
-
-    // Test recursive function
-    std::cout << "Factorial of 5: " << factorial(5) << std::endl;
-
-    // Test exception handling
-    try {
-        riskyFunction(true);  // This will throw an exception
-    } catch (const std::runtime_error& e) {
-        std::cerr << "Caught exception: " << e.what() << std::endl;
-    }
-
-    try {
-        riskyFunction(false); // This will not throw an exception
-    } catch (const std::runtime_error& e) {
-        std::cerr << "Caught exception: " << e.what() << std::endl;
-    }
-
-    TestNoExcept();
-
-    // Test sret
-    Class sretTest;
-    std::cout << "test sret: " << sretTest.testSretDuplication().x0 << std::endl;
-
-    return 0;
 }

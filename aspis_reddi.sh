@@ -243,7 +243,7 @@ if [[ -n "$exclude_file" ]]; then
     exe $LLVM_LINK *.s -o excluded.ll
     echo -e "\xE2\x9C\x94 Linked excluded files to the compilation."
 
-    exe $OPT -load-pass-plugin=./build/passes/libMarkToExclude.so --passes="mark-to-exclude" excluded.ll -o excluded_marked.ll.bak
+    exe $OPT -load-pass-plugin=./build/passes/libAddAnnotation.so --passes="mark-to-exclude" excluded.ll -o excluded_marked.ll.bak
     echo -e "\xE2\x9C\x94 Marked excluded files."
 
     exe mv excluded.ll exclude.ll.bak
@@ -251,6 +251,7 @@ if [[ -n "$exclude_file" ]]; then
     exe rm *.s
     $LLVM_DIS exclude.ll.bak -o exclude.ll.bak
     $LLVM_DIS excluded_marked.ll.bak -o excluded_marked.ll.bak
+    $LLVM_DIS out.ll.bak -o out_m2e.ll.bak
 
     exe $LLVM_LINK excluded_marked.ll.bak out.ll.bak -o out.ll.bak
 fi;
@@ -289,20 +290,20 @@ $OPT --passes="dce,simplifycfg" out.ll -o out.ll
 
 
 ## CONTROL-FLOW CHECKING
-case $cfc in
-    0) 
-        exe $OPT -load-pass-plugin=$DIR/build/passes/libCFCSS.so --passes="cfcss-verify" out.ll -o out.ll $cfc_options
-        ;;
-    1) 
-        exe $OPT -load-pass-plugin=$DIR/build/passes/libRASM.so --passes="rasm-verify" out.ll -o out.ll $cfc_options
-        ;;
-    2) 
-        exe $OPT -load-pass-plugin=$DIR/build/passes/libINTER_RASM.so --passes="rasm-verify" out.ll -o out.ll $cfc_options
-        ;;
-    *)
-        echo -e "\t--no-cfc specified!"
-esac
-echo -e "\xE2\x9C\x94 Applied CFC passes."
+# case $cfc in
+#     0) 
+#         exe $OPT -load-pass-plugin=$DIR/build/passes/libCFCSS.so --passes="cfcss-verify" out.ll -o out.ll $cfc_options
+#         ;;
+#     1) 
+#         exe $OPT -load-pass-plugin=$DIR/build/passes/libRASM.so --passes="rasm-verify" out.ll -o out.ll $cfc_options
+#         ;;
+#     2) 
+#         exe $OPT -load-pass-plugin=$DIR/build/passes/libINTER_RASM.so --passes="rasm-verify" out.ll -o out.ll $cfc_options
+#         ;;
+#     *)
+#         echo -e "\t--no-cfc specified!"
+# esac
+# echo -e "\xE2\x9C\x94 Applied CFC passes."
 
 ## DuplicateGlobals
 # exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="duplicate-globals" out.ll -o out.ll -S $eddi_options
@@ -320,6 +321,7 @@ fi;
 ## Backend
 exe $CLANG $clang_options -O0 out.ll $asm_files -o $output_file 
 echo -e "\xE2\x9C\x94 Binary emitted."
+exe $LLVM_DIS out.ll -o out.ll
 
 #Cleanup
 if [[ $cleanup == true ]]; then
