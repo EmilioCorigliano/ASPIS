@@ -842,7 +842,7 @@ Function *EDDI::getFunctionFromDuplicate(Function *Fn) {
   // Otherwise, we try to get the non-"_dup" version
   Function *FnDup = Fn->getParent()->getFunction(
       Fn->getName().str().substr(0, Fn->getName().str().length() - 8));
-  if (FnDup == NULL) {
+  if (FnDup == NULL || FnDup == Fn) {
     FnDup = Fn->getParent()->getFunction(
         Fn->getName().str().substr(0, Fn->getName().str().length() - 4));
   }
