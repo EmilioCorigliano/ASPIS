@@ -182,7 +182,7 @@ PreservedAnalyses DuplicateGlobals::run(Module &Md, ModuleAnalysisManager &AM) {
           GVCopy->setExternallyInitialized(GV->isExternallyInitialized());
         }
       }
-      if (GVCopy == NULL && !GV->getName().endswith_insensitive("_dup")) {
+      if (GVCopy == NULL && !GV->getName().ends_with_insensitive("_dup")) {
         // get a copy of the global variable
         GVCopy = new GlobalVariable(
                                       Md,
