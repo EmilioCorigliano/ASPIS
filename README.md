@@ -156,6 +156,14 @@ What if it is called a `to_harden` with two parameters where the first one is a 
 
 Solution: Use the `_dup` version.
 
+What about the grey-area variable?
+
+Solution 1:
+Recursively protect also this variable
+
+Solution 2:
+Make a duplication just before the call and don't use it no more
+
 #### Case 1.2
 What if it is called a `to_harden` with two parameters where the first one is an `exclude` GV and the other is in the grey-area.
 
@@ -379,11 +387,105 @@ Indirect function calls: What to do when is performed the dynamic dispatch?
 Solution 1:
 Mark as `to_harden` all the methods of that class, all base classes and to be changed also their vtable entries!
 
-Solution 2:
-Create a new vtable for the real type of the GV to harden with reference to all the methods, then modify the constructor `_dup` to swap the vtable with the custom made one
+*** Solution 2:
+Create a new vtable for the real type of the GV to harden with reference to all the methods, then modify the constructor `_dup` to swap the vtable with the custom made one. 
+the vtable is a global variable, so it can be duplicated and modified.
+In the dup constructor we can store instead of the pointer to the original vtable, the dup version of the vtable
 
 Solution 3:
 Create an entirely new type, with modified methods and its vtable has the new defined methods
+
+notes:
+
+Constructor:
+```C++
+@_ZTV7MyClass = dso_local unnamed_addr constant { [3 x ptr] } { [3 x ptr] [ptr null, ptr @_ZTI7MyClass, ptr @_ZNK7MyClass5printER5Class] }, align 8 // vtable MyClass
+
+@_ZTV12DerivedClass = dso_local unnamed_addr constant { [3 x ptr] } { [3 x ptr] [ptr null, ptr @_ZTI12DerivedClass, ptr @_ZNK12DerivedClass5printER5Class] }, align 8 // vtable DerivedClass
+
+
+; Function Attrs: mustprogress noinline nounwind uwtable
+define dso_local void @_ZN7MyClassC2Eii(ptr noundef nonnull align 8 dereferenceable(16) %0, i32 noundef %1, i32 noundef %2) unnamed_addr #5 align 2 {
+  %4 = alloca ptr, align 8
+  %5 = alloca i32, align 4
+  %6 = alloca i32, align 4
+  store ptr %0, ptr %4, align 8,
+  call void @llvm.dbg.declare(metadata ptr %4, metadata !1063, metadata !DIExpression()),
+  store i32 %1, ptr %5, align 4
+  call void @llvm.dbg.declare(metadata ptr %5, metadata !1065, metadata !DIExpression()),
+  store i32 %2, ptr %6, align 4
+  call void @llvm.dbg.declare(metadata ptr %6, metadata !1067, metadata !DIExpression()),
+  %7 = load ptr, ptr %4, align 8
+  store ptr getelementptr inbounds ({ [3 x ptr] }, ptr @_ZTV7MyClass, i32 0, inrange i32 0, i32 2), ptr %7, align 8,
+  %8 = getelementptr inbounds %class.MyClass, ptr %7, i32 0, i32 1,
+  %9 = load i32, ptr %5, align 4,
+  store i32 %9, ptr %8, align 8,
+  %10 = getelementptr inbounds %class.MyClass, ptr %7, i32 0, i32 2,
+  %11 = load i32, ptr %6, align 4,
+  store i32 %11, ptr %10, align 4,
+  ret void,
+}
+
+
+; Function Attrs: mustprogress noinline nounwind uwtable
+define dso_local void @_ZN12DerivedClassC2Eiii(ptr noundef nonnull align 8 dereferenceable(20) %0, i32 noundef %1, i32 noundef %2, i32 noundef %3) unnamed_addr #5 align 2 {
+  %5 = alloca ptr, align 8
+  %6 = alloca i32, align 4
+  %7 = alloca i32, align 4
+  %8 = alloca i32, align 4
+  store ptr %0, ptr %5, align 8,
+  call void @llvm.dbg.declare(metadata ptr %5, metadata !1091, metadata !DIExpression()),
+  store i32 %1, ptr %6, align 4
+  call void @llvm.dbg.declare(metadata ptr %6, metadata !1093, metadata !DIExpression()),
+  store i32 %2, ptr %7, align 4
+  call void @llvm.dbg.declare(metadata ptr %7, metadata !1095, metadata !DIExpression()),
+  store i32 %3, ptr %8, align 4
+  call void @llvm.dbg.declare(metadata ptr %8, metadata !1097, metadata !DIExpression()),
+  %9 = load ptr, ptr %5, align 8
+  %10 = load i32, ptr %6, align 4,
+  %11 = load i32, ptr %7, align 4,
+  call void @_ZN7MyClassC2Eii(ptr noundef nonnull align 8 dereferenceable(16) %9, i32 noundef %10, i32 noundef %11), // base contructor
+  store ptr getelementptr inbounds ({ [3 x ptr] }, ptr @_ZTV12DerivedClass, i32 0, inrange i32 0, i32 2), ptr %9, align 8, // vtable
+  %12 = getelementptr inbounds %class.DerivedClass, ptr %9, i32 0, i32 1,
+  %13 = load i32, ptr %8, align 4,
+  store i32 %13, ptr %12, align 8,
+  ret void,
+}
+```
+
+
+
+
+#### Case 11
+Handle creation of objects with `new`?
+
+
+notes:
+
+When doing the new:
+```C++
+    %13 = call noalias noundef nonnull ptr @_Znwm(i64 noundef 24) #16, !heapallocsite
+    call void @_ZN12DerivedClassC2Eiii(ptr noundef nonnull align 8 dereferenceable(20) %13, i32 noundef 1, i32 noundef 2, i32 noundef 3),
+    store ptr %13, ptr @globalDClass, align 8,
+```
+
+#### Case 12
+From grey area, when we enter in the SoR with a duplicated function we need to duplicate also all the path of execution of its inputs
+
+```C++
+  %29 = tail call noalias noundef nonnull dereferenceable(64) ptr @_Znwj(i32 noundef 64) #67, !dbg !876789, !heapallocsite !284351
+  %30 = tail call noalias noundef nonnull dereferenceable(64) ptr @_Znwj(i32 noundef 64) #67, !dbg !876789, !heapallocsite !284351
+  %31 = invoke noundef ptr @_ZN4Main13AlgoReferenceC2Ev(ptr noundef nonnull align 4 dereferenceable(64) %29)
+          to label %VerificationBB unwind label %106, !dbg !876790
+
+VerificationBB:                                   ; preds = %VerificationBB3
+  tail call void @llvm.dbg.value(metadata ptr %29, metadata !284349, metadata !DIExpression()), !dbg !876750
+  %32 = tail call i32 @puts(ptr nonnull dereferenceable(1) @str.90), !dbg !876791
+  %33 = tail call noalias noundef nonnull dereferenceable(408) ptr @_Znwj(i32 noundef 408) #67, !dbg !876792, !heapallocsite !295438
+  %34 = tail call noalias noundef nonnull dereferenceable(408) ptr @_Znwj(i32 noundef 408) #67, !dbg !876792, !heapallocsite !295438
+  %35 = invoke ptr @_ZN4Main13ADAControllerC2EPNS_13AlgoReferenceEPNS_7SensorsE_dup(ptr %34, ptr %30, ptr undef, ptr %33, ptr %29, ptr undef)
+          to label %VerificationBB1 unwind label %VerificationBB2, !dbg !876793
+```
 
 
 
