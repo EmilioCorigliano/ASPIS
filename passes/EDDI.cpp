@@ -1442,6 +1442,17 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     LLVM_DEBUG(dbgs() << "Compiling " << iFn++ << "/" << DuplicatedFns.size() << ": "
                       << Fn->getName() << "\n");
     CompiledFuncs.insert(Fn);
+
+    // Get function calls in gray area
+    for(auto U : getFunctionFromDuplicate(Fn)->users()) {
+      if(isa<CallBase>(U)) {
+        auto caller = cast<CallBase>(U)->getFunction();
+        if(toHardenFunctions.find(caller) == toHardenFunctions.end()) {
+          GrayAreaCallsToFix.insert(cast<CallBase>(U));
+        }
+      }
+    }
+
     BasicBlock *ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
 
     LLVM_DEBUG(dbgs() << "function arguments");
