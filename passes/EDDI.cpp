@@ -1290,8 +1290,91 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
   return ClonedFunc;
 }
 
+Type *getValueType(Value *Arg, Align *ArgAlign) {
+
+  // https://llvm.org/docs/OpaquePointers.html
+  while(true) {
+    outs() << "Checking " << *Arg << "\n";
+    if(isa<CallInst>(Arg) && !cast<CallInst>(Arg)->isIndirectCall() && demangle(cast<CallInst>(Arg)->getCalledFunction()->getName().str()).find("operator new") == 0) {
+      Value *Size = cast<CallInst>(Arg)->getArgOperand(0);
+      if(isa<ConstantInt>(Size)) {
+        // Use the size to create a type
+        LLVMContext &Ctx = Arg->getContext();
+
+        // Assume the allocated memory is for an array of bytes
+        Type *ElementType = Type::getInt8Ty(Ctx); // Byte type
+        return ArrayType::get(ElementType, cast<ConstantInt>(Size)->getZExtValue());
+      }
+      errs() << "Call not supported" << *Arg << "\n";
+      return Type::getVoidTy(Arg->getContext());
+    } else if(isa<GlobalValue>(Arg)) {
+      Type *ArgType = cast<GlobalValue>(Arg)->getValueType();
+      if(ArgType->isPointerTy()) {
+        bool foundNewValue = false;
+        for(Value *ArgUsers : cast<GlobalValue>(Arg)->users()) {
+          if (isa<StoreInst>(ArgUsers) && cast<StoreInst>(ArgUsers)->getPointerOperand() == Arg) {
+            Arg = cast<StoreInst>(ArgUsers)->getValueOperand();
+            *ArgAlign = cast<StoreInst>(ArgUsers)->getAlign();
+            errs() << "Store found: " << *ArgUsers << " with align " << ArgAlign->value() << "\n";
+            foundNewValue = true;
+            break;
+          }
+        }
+
+        if(!foundNewValue) {
+          errs() << "Global Type not supported" << *Arg << "\n";
+          return Type::getVoidTy(Arg->getContext());
+        }
+      } else {
+        return ArgType;
+      }
+    } else if(isa<PHINode>(Arg)) {
+      Arg = cast<PHINode>(Arg)->getIncomingValue(0);
+    } else if(isa<AllocaInst>(Arg)) {
+      *ArgAlign = cast<AllocaInst>(Arg)->getAlign();
+      return cast<AllocaInst>(Arg)->getAllocatedType();
+    } else if(isa<GetElementPtrInst>(Arg)) {
+      *ArgAlign = cast<GetElementPtrInst>(Arg)->getPointerAlignment(cast<GetElementPtrInst>(Arg)->getModule()->getDataLayout());
+      return cast<GetElementPtrInst>(Arg)->getSourceElementType();
+    } else if(isa<Function>(Arg)) {
+      return cast<Function>(Arg)->getFunctionType();
+    }  else if(isa<LoadInst>(Arg)) {
+      *ArgAlign = cast<LoadInst>(Arg)->getAlign();
+      Arg = cast<LoadInst>(Arg)->getPointerOperand();
+    } else if(isa<StoreInst>(Arg)) {
+      *ArgAlign = cast<StoreInst>(Arg)->getAlign();
+      Arg = cast<StoreInst>(Arg)->getValueOperand();
+    } else  {
+      errs() << "Type not supported" << *Arg << "\n";
+      return Type::getVoidTy(Arg->getContext());
+    }
+  }
+}
+
 /**
- * I have to duplicate all instructions except function calls and branches
+ * @brief I have to duplicate all instructions except function calls and branches
+ * 
+ * 0. Replacing aliases to aliasees
+ * 1. getting function annotations
+ * 2. Creating fault tolerance functions
+ * 3. Create map of subprogram and linkage names
+ * 4. Duplicate globals
+ *    4.1. 
+ * 5. For each function in module, if it should NOT compile (the function is neither null nor empty, 
+ *    it does not have to be marked as excluded or to_duplicate nor it is one of the original functions) skip
+ * 6. If the function is a duplicated one, we need to iterate over the function arguments and duplicate them in order to access them during the instruction duplication phase 
+ *    6.1. Call duplicateInstruction on all uses of each argument
+ * 7. For each Instruction, duplicate the instruction and then save for delete after if the duplicated instruction is the same as the original
+ * 8. Generate error branches
+ * 9. Delete the marked duplicated instructions
+ * 
+ * 
+ *
+ * 1. Duplicate Globals
+ * 2. Duplicate functions
+ * 3. Duplicate Constructors
+ *
+ * 
  * @param Md
  * @return
  */
@@ -1530,28 +1613,15 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
         const llvm::DataLayout &DL = Md.getDataLayout();
         Type *ArgType;
         
-        // https://llvm.org/docs/OpaquePointers.html
-        if(isa<LoadInst>(Arg)) {
-          ArgType = cast<LoadInst>(Arg)->getType();
-        } else if(isa<StoreInst>(Arg)) {
-          ArgType = cast<StoreInst>(Arg)->getValueOperand()->getType();
-        } else if(isa<GetElementPtrInst>(Arg)) {
-          ArgType = cast<GetElementPtrInst>(Arg)->getSourceElementType();
-        } else if(isa<Function>(Arg)) {
-          ArgType = cast<Function>(Arg)->getFunctionType();
-        } else if(isa<AllocaInst>(Arg)) {
-          ArgType = cast<AllocaInst>(Arg)->getAllocatedType();
-        } else if(isa<GlobalValue>(Arg)) {
-          ArgType = cast<GlobalValue>(Arg)->getValueType();
-        } else {
-          errs() << "Type not supported\n";
-        }
+        Align ArgAlign;
+        ArgType = getValueType(Arg, &ArgAlign);
+        outs() << "Type: " << *ArgType << ", Align: " << ArgAlign.value() << ", instr: " << *Arg << "\n";
 
         uint64_t SizeInBytes = DL.getTypeAllocSize(ArgType);
         Value *Size = llvm::ConstantInt::get(B.getInt64Ty(), SizeInBytes);
         
         // Alignment (assuming alignment of 1 here; adjust as necessary)
-        llvm::ConstantInt *Align = B.getInt32(Arg->getPointerAlignment(DL).value());
+        llvm::ConstantInt *Align = B.getInt32(ArgAlign.value());
 
         // Volatility (non-volatile in this example)
         llvm::ConstantInt *IsVolatile = B.getInt1(false);
