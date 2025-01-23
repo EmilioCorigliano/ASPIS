@@ -1626,6 +1626,11 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
         Align ArgAlign;
         ArgType = getValueType(Arg, &ArgAlign);
 
+        // If can't find type, do not duplicate argument
+        if(ArgType->isVoidTy()) {
+          continue;
+        }
+
         uint64_t SizeInBytes = DL.getTypeAllocSize(ArgType);
         Value *Size = llvm::ConstantInt::get(B.getInt64Ty(), SizeInBytes);
         
