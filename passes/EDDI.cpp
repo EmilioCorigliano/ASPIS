@@ -1436,16 +1436,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
                       << Fn->getName() << "\n");
     CompiledFuncs.insert(Fn);
 
-    // Get function calls in gray area
-    for(auto U : getFunctionFromDuplicate(Fn)->users()) {
-      if(isa<CallBase>(U)) {
-        auto caller = cast<CallBase>(U)->getFunction();
-        if(toHardenFunctions.find(caller) == toHardenFunctions.end()) {
-          GrayAreaCallsToFix.insert(cast<CallBase>(U));
-        }
-      }
-    }
-
     BasicBlock *ErrBB = BasicBlock::Create(Fn->getContext(), "ErrBB", Fn);
 
     LLVM_DEBUG(dbgs() << "function arguments");
@@ -1565,6 +1555,28 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
         if(newErrBB) {
           // insert the code for calling the error basic block in case of a mismatch
           CreateErrBB(Md, *Fn, ErrBB);
+        }
+      }
+    }
+  }
+  
+  // Protect only the explicitly marked `to_harden` functions
+  for(auto annot : FuncAnnotations) {
+    if(annot.second.startswith("to_harden")) {
+      if(isa<Function>(annot.first)) {
+        auto Fn = cast<Function>(annot.first);
+        outs() << "Adding to GrayAreaCallsToFix all calls of " << Fn->getName() << "\n";
+        // Get function calls in gray area
+        for(auto U : getFunctionFromDuplicate(Fn)->users()) {
+          if(isa<CallBase>(U)) {
+            auto caller = cast<CallBase>(U)->getFunction();
+            // Protect this call if it's not in toHardenFunction and is not marked as `exclude`
+            if(toHardenFunctions.find(caller) == toHardenFunctions.end() && 
+                  (FuncAnnotations.find(caller) == FuncAnnotations.end() || !FuncAnnotations.find(caller)->second.startswith("exclude"))) {
+              outs() << "GrayAreaCallsToFix added: " << *U << "\n";
+              GrayAreaCallsToFix.insert(cast<CallBase>(U));
+            }
+          }
         }
       }
     }
