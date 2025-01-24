@@ -345,7 +345,7 @@ void EDDI::preprocess(Module &Md) {
       } else if(isa<Value>(x.first)) {
         toHardenVariables.insert(cast<Value>(x.first));
       }
-    };
+    }
   }
   LLVM_DEBUG(dbgs() << "\n");
 
@@ -355,47 +355,65 @@ void EDDI::preprocess(Module &Md) {
   while(!toCheckVariables.empty()){
     std::set<Value *> toAddVariables; // support set to contain new to-be-checked values
     for(Value *V : toCheckVariables) {
-      for(User *U : V->users()) {
-        if(isa<Instruction>(U)) {
-          Instruction *Instr = cast<Instruction>(U);
+      // outs() << "Instruction to check: " << *V << "\n";
+      // Just protect the return value of the call, not the operands
+      if((isa<Instruction>(V) || isa<GEPOperator>(V)) && !isa<CallBase>(V)) {
+        auto Instr = cast<User>(V);
 
-          // If it is a call, add also the called function in the toHardenFunction set
-          if(isa<CallBase>(U)) {
-            CallBase *CallI = cast<CallBase>(U);     
-            Function *Fn = CallI->getCalledFunction();  
-            if (Fn != NULL && getFunctionDuplicate(Fn) == NULL && 
-                  (FuncAnnotations.find(Fn) == FuncAnnotations.end() || 
-                    (!FuncAnnotations.find(Fn)->second.startswith("exclude") && !FuncAnnotations.find(Fn)->second.startswith("to_duplicate"))) && 
-                  !isToDuplicateName(Fn->getName())) {
-              // If it isn't/hasn't a duplicate version already
-              toHardenFunctions.insert(Fn);
-              // LLVM_DEBUG(dbgs() << "[REDDI] Function to harden: " << Fn->getName() << " (called by " << V->getName() << ")\n");
-            } else {
-              continue;
-              // LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
-            }
+        // Check parameters of function
+        for(int i = 0; i < Instr->getNumOperands(); i++) {
+          Value *operand = nullptr;
+
+          // Get operand
+          if(isa<PHINode>(Instr)) {
+            auto PhiInst = cast<PHINode>(Instr);
+            operand = PhiInst->getIncomingValue(i);
+            // outs() << "phi operand: " << *operand << "\n";
+          } else if(isa<Instruction>(Instr->getOperand(i)) || isa<GlobalVariable>(Instr->getOperand(i)) || isa<GEPOperator>(Instr->getOperand(i))) {
+            operand = Instr->getOperand(i);
+            // outs() << "operand: " << *operand << "\n";
           }
+          
+          // Check if to add operand to toAddVariables
+          if(operand != NULL && operand != V && isa<Instruction>(operand) &&
+                toHardenVariables.find(operand) == toHardenVariables.end() && 
+                toCheckVariables.find(operand) == toCheckVariables.end() && 
+                (FuncAnnotations.find(operand) == FuncAnnotations.end() || !FuncAnnotations.find(operand)->second.startswith("exclude")) && 
+                (!operand->hasName() || !isToDuplicateName(operand->getName())) && 
+                (!isa<AllocaInst>(operand) || !isAllocaForExceptionHandling(*cast<AllocaInst>(operand)))) {
+            toAddVariables.insert(operand);
+            // outs() << "* To be hardened operand: " << *operand << "\n";
+          }
+        }
+      }
 
-          // Add all the operands if never encountered before, if the operand can be considered "an alias" of the variable to be protected
-          if(isa<StoreInst>(Instr) || isa<LoadInst>(Instr) || isa<GetElementPtrInst>(Instr)) {
-            // Add return value to be protected if never encountered before
-            if(U != NULL && isa<Instruction>(U) && U != V && 
-                  toHardenVariables.find(U) == toHardenVariables.end() && 
-                  toCheckVariables.find(U) == toCheckVariables.end() && 
-                  (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
-                  (!U->hasName() || !isToDuplicateName(U->getName()))) {
-              toAddVariables.insert(cast<Instruction>(U));
-            }
-
-            for(auto operand : Instr->operand_values()) {
-              // Add value to be protected if never encountered before
-              if(operand != NULL && operand != V && isa<Instruction>(operand) &&
-                    toHardenVariables.find(operand) == toHardenVariables.end() && 
-                    toCheckVariables.find(operand) == toCheckVariables.end() && 
-                    (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
-                    (!U->hasName() || !isToDuplicateName(U->getName()))) {
-                toAddVariables.insert(operand);
+      for(User *U : V->users()) {
+        if(isa<Instruction>(U) || isa<GEPOperator>(U)) {
+        // if(isa<StoreInst>(U) || isa<LoadInst>(U) || isa<GetElementPtrInst>(U) || isa<BinaryOperator>(U) || isa<PHINode>(U) || isa<SelectInst>(U) || isa<CastInst>(U)) {
+          if(U != NULL && U != V && 
+                toHardenVariables.find(U) == toHardenVariables.end() && 
+                toCheckVariables.find(U) == toCheckVariables.end() && 
+                (FuncAnnotations.find(U) == FuncAnnotations.end() || !FuncAnnotations.find(U)->second.startswith("exclude")) && 
+                (!U->hasName() || !isToDuplicateName(U->getName())) && 
+                (!isa<AllocaInst>(U) || !isAllocaForExceptionHandling(*cast<AllocaInst>(U)))) {
+            // outs() << "* To be hardened user: " << *U << "\n";
+            // If it is a call, add also the called function in the toHardenFunction set
+            if(isa<CallBase>(U)) {
+              CallBase *CallI = cast<CallBase>(U);     
+              Function *Fn = CallI->getCalledFunction();  
+              if (Fn != NULL && getFunctionDuplicate(Fn) == NULL && 
+                    (FuncAnnotations.find(Fn) == FuncAnnotations.end() || 
+                      (!FuncAnnotations.find(Fn)->second.startswith("exclude") && !FuncAnnotations.find(Fn)->second.startswith("to_duplicate"))) && 
+                    !isToDuplicateName(Fn->getName()) && !Fn->getName().starts_with("__clang_call_terminate")) {
+                // If it isn't/hasn't a duplicate version already
+                toHardenFunctions.insert(Fn);
+                toAddVariables.insert(U);
+              } else {
+                LLVM_DEBUG(errs() << "[REDDI] Indirect Function to harden (called by " << V->getName() << ")\n");
+                // continue;
               }
+            } else {
+              toAddVariables.insert(U);
             }
           }
         }
@@ -437,7 +455,10 @@ void EDDI::preprocess(Module &Md) {
                 (JustAddedFns.find(CalledFn) != JustAddedFns.end() ? " (already in JustAddedFns)" : "") <<
                 "\n");
               if(to_harden && toHardenFunctions.find(CalledFn) == toHardenFunctions.end() && 
-                JustAddedFns.find(CalledFn) == JustAddedFns.end() && getFunctionDuplicate(CalledFn) == NULL && (FuncAnnotations.find(CalledFn) == FuncAnnotations.end() || !FuncAnnotations.find(CalledFn)->second.startswith("exclude"))) {
+                JustAddedFns.find(CalledFn) == JustAddedFns.end() && 
+                getFunctionDuplicate(CalledFn) == NULL && 
+                (FuncAnnotations.find(CalledFn) == FuncAnnotations.end() || !FuncAnnotations.find(CalledFn)->second.startswith("exclude")) &&
+                !CalledFn->getName().starts_with("__clang_call_terminate")) {
                 // If is a new function to and it isn't/hasn't a duplicate version
                 toAddFns.insert(CalledFn);
                 // LLVM_DEBUG(dbgs() << "[REDDI] Added: " << CalledFn->getName() << "\n");
@@ -1585,6 +1606,15 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   LLVM_DEBUG(dbgs() << "Fixing gray area calls\n");
   // Add alloca and memcpy of non duplicated instructions and use that as duplciated instr
   for(CallBase *CInstr : GrayAreaCallsToFix) {
+    if(CInstr->getCalledFunction() == NULL || 
+        (FuncAnnotations.find(CInstr->getCalledFunction()) != FuncAnnotations.end() && 
+        FuncAnnotations.find(CInstr->getCalledFunction())->second.startswith("exclude"))) {
+      // Maybe check if have to fix operands and return after the call
+      errs() << "About to duplicate a call not to duplciate: " << *CInstr << "\n";
+      continue;
+    }
+
+
     // Map with the duplicated instructions, including the temporary load ones
     std::map<Value *, Value *> TmpDuplicatedInstructionMap{DuplicatedInstructionMap};
     Function *Fn = CInstr->getFunction();
