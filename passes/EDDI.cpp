@@ -1606,9 +1606,8 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   LLVM_DEBUG(dbgs() << "Fixing gray area calls\n");
   // Add alloca and memcpy of non duplicated instructions and use that as duplciated instr
   for(CallBase *CInstr : GrayAreaCallsToFix) {
-    if(CInstr->getCalledFunction() == NULL || 
-        (FuncAnnotations.find(CInstr->getCalledFunction()) != FuncAnnotations.end() && 
-        FuncAnnotations.find(CInstr->getCalledFunction())->second.startswith("exclude"))) {
+    if(FuncAnnotations.find(CInstr->getCalledFunction()) != FuncAnnotations.end() && 
+        FuncAnnotations.find(CInstr->getCalledFunction())->second.startswith("exclude")) {
       // Maybe check if have to fix operands and return after the call
       errs() << "About to duplicate a call not to duplciate: " << *CInstr << "\n";
       continue;
