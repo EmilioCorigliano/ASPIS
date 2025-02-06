@@ -35,6 +35,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::map<Value*, StringRef> FuncAnnotations;
         std::set<Function*> OriginalFunctions;
 
+        std::set<Instruction *> InstructionsToRemove;
         std::set<Function*> toHardenConstructors;
         std::set<Function*> toHardenFunctions;
         std::set<Value*> toHardenVariables;

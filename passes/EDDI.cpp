@@ -349,6 +349,34 @@ void EDDI::preprocess(Module &Md) {
   }
   LLVM_DEBUG(dbgs() << "\n");
 
+  // Getting the explicit `to_harden` functions and Values
+  LLVM_DEBUG(dbgs() << "[REDDI] Getting all the global variables to harden from explicitly to_harden functions\n");
+  for(auto *Fn : toHardenFunctions) {
+    for(auto &BB : *Fn) {
+      for(auto &I : BB) {
+        for(auto &V : I.operands()) {
+
+          // if(isa<GlobalVariable>(V) && V->hasName() && !isToDuplicateName(V->getName())) {
+          if(isa<GlobalVariable>(V) && cast<GlobalVariable>(V)->hasInitializer() && toHardenVariables.find(V) == toHardenVariables.end()) {
+            toHardenVariables.insert(V);
+            outs() << "Inserting GV from explicit toHarden: " << *V << "\n";
+          } 
+          else if(isa<GEPOperator>(V)) {
+            for(auto &U : cast<GEPOperator>(V)->operands()) {
+              // if(isa<GlobalVariable>(U) && U->hasName() && !isToDuplicateName(U->getName())) {
+              if(isa<GlobalVariable>(U) && cast<GlobalVariable>(U)->hasInitializer() && toHardenVariables.find(U) == toHardenVariables.end()) {
+                toHardenVariables.insert(U);
+                outs() << "Inserting GV from explicit toHarden from GEPOp: " << *U << "\n";
+              }
+            }
+          }
+
+        }
+      }
+    }
+  }
+  LLVM_DEBUG(dbgs() << "\n");
+
   // Collecting all the functions called by a value to be hardened
   LLVM_DEBUG(dbgs() << "[REDDI] Getting all the functions to harden called by a Global Variable\n");
   std::set<Value *> toCheckVariables{toHardenVariables};
@@ -575,8 +603,13 @@ void EDDI::duplicateOperands(
     // if the operand has not been duplicated we need to duplicate it
     if (isa<Instruction>(V)) {
       Instruction *Operand = cast<Instruction>(V);
-      if (!isValueDuplicated(DuplicatedInstructionMap, *Operand))
-        duplicateInstruction(*Operand, DuplicatedInstructionMap, ErrBB);
+      if (!isValueDuplicated(DuplicatedInstructionMap, *Operand)) {
+        if(duplicateInstruction(*Operand, DuplicatedInstructionMap, ErrBB)) {
+          if(InstructionsToRemove.find(Operand) == InstructionsToRemove.end()) {
+            InstructionsToRemove.insert(Operand);
+          }
+        }
+      }
     }
     // It may happen that we have a GEP as inline operand of a instruction. The
     // operands of the GEP are not duplicated leading to errors, so we manually
@@ -1447,7 +1480,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   fixDuplicatedConstructors(Md);
 
   // list of duplicated instructions to remove since they are equal to the original
-  std::set<Instruction *> InstructionsToRemove;
   std::set<CallBase *> GrayAreaCallsToFix;
   int iFn = 1;
   LLVM_DEBUG(dbgs() << "Iterating over the functions...\n");
@@ -1582,6 +1614,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   }
   
   // Protect only the explicitly marked `to_harden` functions
+  LLVM_DEBUG(dbgs() << "Getting all GrayAreaCallsToFix...\n");
   for(auto annot : FuncAnnotations) {
     if(annot.second.startswith("to_harden")) {
       if(isa<Function>(annot.first)) {
