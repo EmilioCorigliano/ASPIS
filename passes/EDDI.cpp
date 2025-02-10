@@ -1013,19 +1013,27 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
       Copy = DuplicatedInstructionMap.find(Arg)->second;
     }
 
-    if (!AlternateMemMapEnabled && (Callee == NULL || !Callee->isVarArg())) {
-      args.insert(args.begin() + i, Copy);
+    // Duplicating only fixed parameters, passing just one time the variadic arguments
+    if(Callee != NULL && Callee->getFunctionType() != NULL && i >= Callee->getFunctionType()->getNumParams()) {
       args.push_back(Arg);
       if(Callee == NULL) {
-        ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
         ParamTypes.push_back(Arg->getType());
       }
     } else {
-      args.push_back(Copy);
-      args.push_back(Arg);
-      if(Callee == NULL) {
-        ParamTypes.push_back(Arg->getType());
-        ParamTypes.push_back(Arg->getType());
+      if (!AlternateMemMapEnabled) {
+        args.insert(args.begin() + i, Copy);
+        args.push_back(Arg);
+        if(Callee == NULL) {
+          ParamTypes.insert(ParamTypes.begin() + i, Arg->getType());
+          ParamTypes.push_back(Arg->getType());
+        }
+      } else {
+        args.push_back(Copy);
+        args.push_back(Arg);
+        if(Callee == NULL) {
+          ParamTypes.push_back(Arg->getType());
+          ParamTypes.push_back(Arg->getType());
+        }
       }
     }
   }
@@ -1296,7 +1304,11 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
   std::vector<Type *> paramTypeVec;
   for (int i = 0; i < Fn.arg_size(); i++) {
     Type *ParamType = FnType->params()[i];
-    if (!AlternateMemMapEnabled && !Fn.isVarArg()) { // sequential
+
+    // Passing just one time the variadic arguments while passing two times the fixed ones
+    if(i >= FnType->getNumParams()) {
+      paramTypeVec.push_back(ParamType);
+    } else if (!AlternateMemMapEnabled) { // sequential
       paramTypeVec.insert(paramTypeVec.begin() + i, ParamType);
       paramTypeVec.push_back(ParamType);
     } else {
@@ -1319,7 +1331,7 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
       Fn.getArg(i)->removeAttr(Attribute::AttrKind::StructRet);
     }
 
-    if (!AlternateMemMapEnabled && !Fn.isVarArg()) {
+    if (!AlternateMemMapEnabled) {
       Params[Fn.getArg(i)] = ClonedFunc->getArg(Fn.arg_size() + i);
     } else {
       Params[Fn.getArg(i)] = ClonedFunc->getArg(i * 2);
@@ -1495,7 +1507,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     // save the function arguments and their duplicates
     for (int i = 0; i < Fn->arg_size(); i++) {
       Value *Arg, *ArgClone;
-      if (!AlternateMemMapEnabled && !Fn->isVarArg()) {
+      if (!AlternateMemMapEnabled) {
         if (i >= Fn->arg_size() / 2) {
           break;
         }
